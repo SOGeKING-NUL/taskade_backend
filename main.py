@@ -13,11 +13,14 @@ Architecture:
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
+from db import async_session, init_db
+import services.task_service as task_service
 from services.stt_deepgram import DeepgramStreamingSTT
 from services.tts import SarvamTTS
 from services.llm import OpenRouterLLM
@@ -31,7 +34,13 @@ logging.basicConfig(
 logger = logging.getLogger("engine")
 
 # ── App & middleware ─────────────────────────────────────────────────────
-app = FastAPI(title="TTS Speech Engine", version="0.3.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await init_db()
+    yield
+
+
+app = FastAPI(title="TTS Speech Engine", version="0.4.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -113,13 +122,13 @@ async def run_voice_pipeline(
                     escalation = ev
                     break
 
-            # 2) Escalate to the tool-calling LLM
+            # 2) Escalate to the tool-calling LLM.
+            # NOTE: no spoken filler here — sending a filler sentence then waiting
+            # several seconds for the LLM makes Sarvam treat it as a complete
+            # utterance (send_completion_event), ending TTS before the real
+            # answer. The UI's "thinking" indicator covers the gap instead.
             if escalation is not None:
                 await _send_json(ws, {"type": "escalated", "intent": escalation.get("intent_summary", "")})
-                # Spoken filler covers the OpenRouter round-trip.
-                filler = "Let me take care of that. "
-                await _emit(filler)
-                await sentence_queue.put(filler)
 
                 messages = [{"role": "system", "content": llm_service.system_prompt}]
                 messages += list(conversation_history)
@@ -361,6 +370,25 @@ async def voice_websocket(ws: WebSocket) -> None:
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "service": "tts-speech-engine"}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  Tasks REST (read-only — powers the frontend test panel)
+# ═════════════════════════════════════════════════════════════════════════
+@app.get("/tasks")
+async def list_tasks(user_id: str = "local-user"):
+    """Return all tasks for a user, with parent titles, for the UI panel."""
+    async with async_session() as session:
+        tasks = await task_service.get_tasks(session, user_id, scope="all")
+        out = []
+        for t in tasks:
+            brief = t.to_brief()
+            brief["parent_title"] = None
+            if t.parent_id:
+                parent = next((p for p in tasks if p.id == t.parent_id), None)
+                brief["parent_title"] = parent.title if parent else None
+            out.append(brief)
+    return {"tasks": out}
 
 
 # ═════════════════════════════════════════════════════════════════════════

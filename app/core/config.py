@@ -48,6 +48,13 @@ class Settings:
     # Pick a cheap, capable tool-calling model from OpenRouter's current catalog.
     OPENROUTER_LLM_MODEL: str = os.getenv("OPENROUTER_LLM_MODEL", "openai/gpt-4o-mini")
 
+    # ── Database (Postgres, async) ───────────────────────────────
+    # Format: postgresql+asyncpg://USER:PASSWORD@HOST:PORT/DBNAME
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://postgres:postgres@localhost:5432/taskade",
+    )
+
     # ── Server ───────────────────────────────────────────────────
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))

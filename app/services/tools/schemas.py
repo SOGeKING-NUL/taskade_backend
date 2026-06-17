@@ -14,11 +14,10 @@ ESCALATE_TOOL = {
     "function": {
         "name": "escalate_to_assistant",
         "description": (
-            "Hand off to the advanced assistant when the user wants an ACTION "
-            "rather than a simple spoken answer: creating, updating, completing, "
-            "or looking up a task/reminder, or anything that needs research or "
-            "tools. Do NOT call this for greetings, casual chat, or general "
-            "knowledge questions you can answer directly in a sentence or two."
+            "Hand off to the advanced assistant ONLY when the user wants to "
+            "create, update, complete, or list/look up a task or reminder. "
+            "Do NOT call this for greetings, casual chat, or general/factual "
+            "questions — answer those yourself directly."
         ),
         "parameters": {
             "type": "object",
@@ -27,13 +26,8 @@ ESCALATE_TOOL = {
                     "type": "string",
                     "description": "One sentence describing exactly what the user wants done.",
                 },
-                "category": {
-                    "type": "string",
-                    "enum": ["task", "research", "query", "other"],
-                    "description": "task=create/update a task; query=look up existing tasks; research=needs web info; other=anything else needing tools.",
-                },
             },
-            "required": ["intent_summary", "category"],
+            "required": ["intent_summary"],
         },
     },
 }

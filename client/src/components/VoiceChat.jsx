@@ -12,12 +12,16 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import ChatMessage from "./ChatMessage";
 import StatusIndicator from "./StatusIndicator";
 import ToolActivity from "./ToolActivity";
+import TasksPanel from "./TasksPanel";
 import { VADManager } from "../utils/vadManager";
 import { AudioPlayer } from "../utils/audioPlayer";
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ||
   `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/voice`;
+
+// REST base for the tasks panel (backend runs on :8000 in dev)
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 // Pre-speech ring buffer: ~500ms of audio frames for capturing speech onset
 const RING_BUFFER_FRAMES = 15; // 15 frames × 32ms = ~480ms
@@ -30,6 +34,7 @@ export default function VoiceChat() {
   const [interimTranscript, setInterimTranscript] = useState("");
   const [isConnected, setIsConnected] = useState(false);
   const [toolActivity, setToolActivity] = useState([]); // escalation + tool-call log
+  const [tasks, setTasks] = useState([]); // persisted tasks (from GET /tasks)
 
   // ── Refs (survive re-renders, avoid stale closures) ────────────────
   const wsRef = useRef(null);
@@ -85,6 +90,22 @@ export default function VoiceChat() {
     setInterimTranscript("");
   }, []);
 
+  // ── Fetch persisted tasks for the panel ────────────────────────────
+  const fetchTasks = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/tasks`);
+      const data = await res.json();
+      setTasks(data.tasks || []);
+    } catch (err) {
+      console.warn("Failed to fetch tasks:", err);
+    }
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    fetchTasks();
+  }, [fetchTasks]);
+
   // ── WebSocket message handler ──────────────────────────────────────
   const handleMessage = useCallback((data) => {
     switch (data.type) {
@@ -132,6 +153,8 @@ export default function VoiceChat() {
           ...prev,
           { kind: "tool-result", name: data.name, ok: data.ok, summary: data.summary },
         ]);
+        // A tool may have changed tasks — refresh the panel.
+        fetchTasks();
         break;
 
       // ── LLM events ────────────────────────────────────────────
@@ -214,7 +237,7 @@ export default function VoiceChat() {
       default:
         break;
     }
-  }, [resumeListening]);
+  }, [resumeListening, fetchTasks]);
 
   // ── WebSocket connection (with auto-reconnect) ─────────────────────
   useEffect(() => {
@@ -445,8 +468,9 @@ export default function VoiceChat() {
         <div ref={messagesEndRef} />
       </main>
 
-      {/* ── Tool activity (Milestone 1 test harness) ─────────────────── */}
+      {/* ── Tool activity + persisted tasks (test harness) ───────────── */}
       <ToolActivity items={toolActivity} />
+      <TasksPanel tasks={tasks} />
 
       {/* ── Status Indicator ─────────────────────────────────────────── */}
       <footer className="controls">
