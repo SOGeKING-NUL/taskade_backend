@@ -1,0 +1,27 @@
+# Python virtual environments
+venv/
+server/venv/
+__pycache__/
+*.pyc
+server/__pycache__/
+server/services/__pycache__/
+
+# Node.js dependencies and builds
+node_modules/
+client/node_modules/
+dist/
+client/dist/
+*.log
+
+# Sensitive environment variables
+.env
+server/.env
+client/.env
+client/.env.local
+.env.local
+
+# IDEs and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

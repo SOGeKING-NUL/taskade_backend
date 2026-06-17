@@ -1,0 +1,580 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Voice AI — Minimalist Dark Theme (Notion-like)
+   ═══════════════════════════════════════════════════════════════════════ */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap");
+
+/* ── Design Tokens ────────────────────────────────────────────────────── */
+:root {
+  --bg-primary: #191919;
+  --bg-secondary: #202020;
+  --bg-surface: rgba(255, 255, 255, 0.05);
+  --bg-glass: rgba(30, 30, 30, 0.8);
+  --border-subtle: rgba(255, 255, 255, 0.09);
+
+  --text-primary: #EBEBEA;
+  --text-secondary: rgba(255, 255, 255, 0.65);
+  --text-muted: rgba(255, 255, 255, 0.4);
+
+  --accent-primary: #EBEBEA;
+  --accent-secondary: #5A5A5A;
+  
+  --success: #2EA043;
+  --error: #FF6A55;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 9999px;
+}
+
+/* ── Reset ─────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  width: 100vw;
+  height: 100%;
+}
+
+/* ── App wrapper ──────────────────────────────────────────────────────── */
+.app {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  background: var(--bg-primary);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Launch Screen
+   ═══════════════════════════════════════════════════════════════════════ */
+.launch-screen {
+  align-items: center;
+  justify-content: center;
+}
+
+.launch-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  animation: fadeIn 0.4s ease;
+}
+
+.launch-btn {
+  padding: 12px 24px;
+  font-size: 1rem;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.launch-btn:hover {
+  background: #2C2C2C;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.launch-btn:active {
+  transform: scale(0.98);
+}
+
+.launch-hint {
+  margin-top: 16px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Voice Chat Container
+   ═══════════════════════════════════════════════════════════════════════ */
+.voice-chat {
+  width: 100%;
+  max-width: 700px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+.header {
+  padding: 28px 28px 18px;
+  text-align: center;
+  position: relative;
+  z-index: 10;
+  flex-shrink: 0;
+}
+
+.header::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 28px;
+  right: 28px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border-subtle), transparent);
+}
+
+.header-content {
+  position: relative;
+}
+
+.title {
+  font-size: 1.85rem;
+  font-weight: 700;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.subtitle {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-weight: 400;
+}
+
+/* Connection dot */
+.status-dot {
+  position: absolute;
+  top: 8px;
+  right: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-full);
+  background: var(--error);
+  transition: background 0.4s ease, box-shadow 0.4s ease;
+}
+
+.status-dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.55);
+}
+
+/* Clear button */
+.clear-btn {
+  position: absolute;
+  top: 6px;
+  left: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s, background 0.2s;
+}
+
+.clear-btn:hover {
+  color: var(--error);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.clear-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Messages
+   ═══════════════════════════════════════════════════════════════════════ */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  scroll-behavior: smooth;
+}
+
+.messages::-webkit-scrollbar { width: 4px; }
+.messages::-webkit-scrollbar-track { background: transparent; }
+.messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-full);
+}
+
+/* ── Empty state ───────────────────────────────────────────────────── */
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  text-align: center;
+  animation: fadeIn 0.6s ease;
+}
+
+.empty-icon {
+  font-size: 3.2rem;
+  animation: float 3.5s ease-in-out infinite;
+}
+
+.empty-text {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  font-weight: 400;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Message Bubbles
+   ═══════════════════════════════════════════════════════════════════════ */
+.message {
+  max-width: 82%;
+  padding: 14px 20px;
+  border-radius: var(--radius-lg);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  animation: messageIn 0.35s ease;
+  word-break: break-word;
+}
+
+/* User */
+.message.user {
+  align-self: flex-end;
+  background: linear-gradient(
+    135deg,
+    rgba(124, 58, 237, 0.22),
+    rgba(59, 130, 246, 0.15)
+  );
+  border: 1px solid rgba(124, 58, 237, 0.22);
+}
+
+/* Assistant */
+.message.assistant {
+  align-self: flex-start;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-subtle);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* Error badge */
+.message.error {
+  border-color: rgba(239, 68, 68, 0.25);
+}
+
+/* Streaming cursor */
+.message.streaming .message-text::after {
+  content: "▊";
+  animation: blink 0.75s step-end infinite;
+  color: var(--accent-purple-light);
+  margin-left: 2px;
+}
+
+/* Role label */
+.message-role {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+}
+
+.message.user .message-role { color: var(--accent-purple-light); }
+.message.assistant .message-role { color: var(--accent-cyan); }
+
+/* Message text */
+.message-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Controls / Footer
+   ═══════════════════════════════════════════════════════════════════════ */
+.controls {
+  padding: 16px 28px 36px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  position: relative;
+  z-index: 10;
+  flex-shrink: 0;
+}
+
+.controls::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 28px;
+  right: 28px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border-subtle), transparent);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Status Indicator (replaces MicButton)
+   ═══════════════════════════════════════════════════════════════════════ */
+.status-indicator {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.indicator-label {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  transition: color 0.3s ease;
+}
+
+/* ── The animated orb ───────────────────────────────────────────────── */
+.indicator-orb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.orb-core {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  background: var(--text-muted);
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 2;
+}
+
+.orb-ring {
+  position: absolute;
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  transition: all 0.4s ease;
+  opacity: 0;
+}
+
+.ring-1 { inset: 6px; }
+.ring-2 { inset: -2px; }
+.ring-3 { inset: -10px; }
+
+/* ── Idle ──────────────────────────────────────────────────────────── */
+.status-indicator.idle .orb-core {
+  background: var(--text-muted);
+  animation: idlePulse 2.5s ease-in-out infinite;
+}
+
+/* ── Listening ────────────────────────────────────────────────────── */
+.status-indicator.listening .orb-core {
+  background: var(--accent-blue);
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.4);
+  animation: listenPulse 2s ease-in-out infinite;
+}
+
+.status-indicator.listening .ring-1 {
+  opacity: 0.5;
+  border-color: rgba(59, 130, 246, 0.3);
+  animation: ringPulse 2s ease-in-out infinite;
+}
+
+.status-indicator.listening .ring-2 {
+  opacity: 0.25;
+  border-color: rgba(59, 130, 246, 0.15);
+  animation: ringPulse 2s ease-in-out infinite 0.4s;
+}
+
+.status-indicator.listening .indicator-label {
+  color: var(--accent-blue);
+}
+
+/* ── Recording (user is speaking) ─────────────────────────────────── */
+.status-indicator.recording .orb-core {
+  background: linear-gradient(135deg, #ef4444, #f97316);
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.5);
+  animation: recordPulse 0.8s ease-in-out infinite;
+  width: 24px;
+  height: 24px;
+}
+
+.status-indicator.recording .ring-1 {
+  opacity: 0.7;
+  border-color: rgba(239, 68, 68, 0.4);
+  animation: ripple 1.4s ease-out infinite;
+}
+
+.status-indicator.recording .ring-2 {
+  opacity: 0.4;
+  border-color: rgba(239, 68, 68, 0.25);
+  animation: ripple 1.4s ease-out infinite 0.3s;
+}
+
+.status-indicator.recording .ring-3 {
+  opacity: 0.2;
+  border-color: rgba(239, 68, 68, 0.15);
+  animation: ripple 1.4s ease-out infinite 0.6s;
+}
+
+.status-indicator.recording .indicator-label {
+  color: #ef4444;
+}
+
+/* ── Processing ───────────────────────────────────────────────────── */
+.status-indicator.processing .orb-core {
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.35);
+  animation: processSpin 1.2s linear infinite;
+}
+
+.status-indicator.processing .ring-1 {
+  opacity: 0.6;
+  border-color: transparent;
+  border-top-color: rgba(59, 130, 246, 0.6);
+  border-right-color: rgba(6, 182, 212, 0.3);
+  animation: spin 1s linear infinite;
+}
+
+.status-indicator.processing .indicator-label {
+  color: var(--accent-cyan);
+}
+
+/* ── Speaking ─────────────────────────────────────────────────────── */
+.status-indicator.speaking .orb-core {
+  background: linear-gradient(135deg, var(--accent-cyan), var(--success));
+  box-shadow: 0 0 20px rgba(6, 182, 212, 0.4);
+  animation: speakPulse 1s ease-in-out infinite;
+}
+
+.status-indicator.speaking .ring-1 {
+  opacity: 0.5;
+  border-color: rgba(6, 182, 212, 0.3);
+  animation: speakRing 1s ease-in-out infinite;
+}
+
+.status-indicator.speaking .ring-2 {
+  opacity: 0.25;
+  border-color: rgba(34, 197, 94, 0.2);
+  animation: speakRing 1s ease-in-out infinite 0.2s;
+}
+
+.status-indicator.speaking .indicator-label {
+  color: var(--accent-cyan);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Animations
+   ═══════════════════════════════════════════════════════════════════════ */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-12px); }
+}
+
+@keyframes messageIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+@keyframes idlePulse {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50%      { opacity: 0.7; transform: scale(1.05); }
+}
+
+@keyframes listenPulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.15); }
+}
+
+@keyframes ringPulse {
+  0%, 100% { transform: scale(1); opacity: 0.5; }
+  50%      { transform: scale(1.08); opacity: 0.3; }
+}
+
+@keyframes recordPulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.2); }
+}
+
+@keyframes ripple {
+  0%   { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+@keyframes processSpin {
+  0%   { transform: rotate(0deg) scale(1); }
+  50%  { transform: rotate(180deg) scale(0.9); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes speakPulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.1); }
+}
+
+@keyframes speakRing {
+  0%, 100% { transform: scale(1); opacity: 0.5; }
+  50%      { transform: scale(1.12); opacity: 0.2; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Responsive
+   ═══════════════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  .voice-chat { max-width: 100%; }
+  .header { padding: 20px 18px 14px; }
+  .messages { padding: 18px; }
+  .controls { padding: 12px 18px 28px; }
+  .title { font-size: 1.5rem; }
+  .message { max-width: 90%; padding: 12px 16px; }
+}
+
+@media (max-width: 400px) {
+  .subtitle { display: none; }
+}
