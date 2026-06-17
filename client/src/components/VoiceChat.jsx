@@ -11,6 +11,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import ChatMessage from "./ChatMessage";
 import StatusIndicator from "./StatusIndicator";
+import ToolActivity from "./ToolActivity";
 import { VADManager } from "../utils/vadManager";
 import { AudioPlayer } from "../utils/audioPlayer";
 
@@ -28,6 +29,7 @@ export default function VoiceChat() {
   const [currentResponse, setCurrentResponse] = useState("");
   const [interimTranscript, setInterimTranscript] = useState("");
   const [isConnected, setIsConnected] = useState(false);
+  const [toolActivity, setToolActivity] = useState([]); // escalation + tool-call log
 
   // ── Refs (survive re-renders, avoid stale closures) ────────────────
   const wsRef = useRef(null);
@@ -112,6 +114,24 @@ export default function VoiceChat() {
     
         statusRef.current = "processing";
         setStatus("processing");
+        // Fresh turn — clear the previous turn's activity log
+        setToolActivity([]);
+        break;
+
+      // ── Tool-calling events (Milestone 1 test harness) ────────
+      case "escalated":
+        setToolActivity((prev) => [...prev, { kind: "escalate", text: data.intent }]);
+        break;
+
+      case "tool.start":
+        setToolActivity((prev) => [...prev, { kind: "tool-start", name: data.name }]);
+        break;
+
+      case "tool.result":
+        setToolActivity((prev) => [
+          ...prev,
+          { kind: "tool-result", name: data.name, ok: data.ok, summary: data.summary },
+        ]);
         break;
 
       // ── LLM events ────────────────────────────────────────────
@@ -188,6 +208,7 @@ export default function VoiceChat() {
 
       case "history_cleared":
         setMessages([]);
+        setToolActivity([]);
         break;
 
       default:
@@ -358,6 +379,7 @@ export default function VoiceChat() {
       wsRef.current.send(JSON.stringify({ type: "clear_history" }));
     }
     setMessages([]);
+    setToolActivity([]);
   };
 
   // ── Render ─────────────────────────────────────────────────────────
@@ -422,6 +444,9 @@ export default function VoiceChat() {
 
         <div ref={messagesEndRef} />
       </main>
+
+      {/* ── Tool activity (Milestone 1 test harness) ─────────────────── */}
+      <ToolActivity items={toolActivity} />
 
       {/* ── Status Indicator ─────────────────────────────────────────── */}
       <footer className="controls">

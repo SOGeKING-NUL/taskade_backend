@@ -20,7 +20,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import settings
 from services.stt_deepgram import DeepgramStreamingSTT
 from services.tts import SarvamTTS
-from services.llm import GeminiLLM
+from services.llm import OpenRouterLLM
+from services.slm import GroqSLM
 
 # ── Logging ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -41,7 +42,8 @@ app.add_middleware(
 )
 
 # ── Global services (stateless, shared across connections) ───────────────
-llm_service = GeminiLLM()
+slm_service = GroqSLM()       # fast conversational path (Groq)
+llm_service = OpenRouterLLM()  # tool-calling / research path (OpenRouter)
 
 # ── Sentence-boundary characters ────────────────────────────────────────
 _SENTENCE_ENDERS = frozenset(".!?।;:")
@@ -66,40 +68,87 @@ async def run_voice_pipeline(
     transcript: str,
     conversation_history: list[dict],
     tts_service: SarvamTTS,
+    session_context: dict,
 ) -> None:
     """
-    LLM → TTS cascade for one user turn.
+    SLM (fast) → optional LLM tool-calling → TTS cascade for one user turn.
 
-    Receives a pre-computed transcript (from Deepgram utterance_end) and runs it
-    through the LLM and TTS pipeline concurrently.
+    Receives a pre-computed transcript (from Deepgram utterance_end). The fast
+    SLM answers directly when possible; if it escalates, the OpenRouter LLM runs
+    the tool-calling loop. Either way, produced text streams sentence-by-sentence
+    into the TTS path. Conversation history is stored in OpenAI message format.
     """
 
-    # ── LLM + TTS (concurrent) ───────────────────────────────────────────
-    await _send_json(ws, {"type": "processing", "stage": "llm"})
+    await _send_json(ws, {"type": "processing", "stage": "slm"})
 
     sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
     full_response_parts: list[str] = []
 
-    # ── Task A: stream LLM → buffer sentences → push to queue ───────────
-    async def _llm_to_sentences() -> None:
-        sentence_buf = ""
-        try:
-            async for token in llm_service.stream_response(transcript, conversation_history):
-                await _send_json(ws, {"type": "llm.token", "text": token})
-                sentence_buf += token
-                full_response_parts.append(token)
+    async def _emit(token: str) -> str:
+        """Send a text token to client + buffer it; returns nothing (uses closure)."""
+        await _send_json(ws, {"type": "llm.token", "text": token})
+        full_response_parts.append(token)
+        return token
 
-                stripped = sentence_buf.strip()
-                if stripped and len(stripped) > 5 and stripped[-1] in _SENTENCE_ENDERS:
-                    await sentence_queue.put(sentence_buf)
-                    sentence_buf = ""
+    # ── Task A: route through SLM, escalate to LLM if needed → sentences ──
+    async def _produce_text() -> None:
+        sentence_buf = ""
+
+        async def _push_sentences(buf: str) -> str:
+            stripped = buf.strip()
+            if stripped and len(stripped) > 5 and stripped[-1] in _SENTENCE_ENDERS:
+                await sentence_queue.put(buf)
+                return ""
+            return buf
+
+        try:
+            # 1) Fast SLM path
+            escalation = None
+            async for ev in slm_service.stream_response(transcript, conversation_history):
+                if ev["type"] == "text":
+                    await _emit(ev["text"])
+                    sentence_buf += ev["text"]
+                    sentence_buf = await _push_sentences(sentence_buf)
+                elif ev["type"] == "escalate":
+                    escalation = ev
+                    break
+
+            # 2) Escalate to the tool-calling LLM
+            if escalation is not None:
+                await _send_json(ws, {"type": "escalated", "intent": escalation.get("intent_summary", "")})
+                # Spoken filler covers the OpenRouter round-trip.
+                filler = "Let me take care of that. "
+                await _emit(filler)
+                await sentence_queue.put(filler)
+
+                messages = [{"role": "system", "content": llm_service.system_prompt}]
+                messages += list(conversation_history)
+                messages.append({
+                    "role": "user",
+                    "content": f"{transcript}\n\n[intent: {escalation.get('intent_summary', '')}]",
+                })
+
+                async for ev in llm_service.run_conversation(messages, session_context):
+                    if ev["type"] == "text":
+                        await _emit(ev["text"])
+                        sentence_buf += ev["text"]
+                        sentence_buf = await _push_sentences(sentence_buf)
+                    elif ev["type"] == "tool.start":
+                        await _send_json(ws, {"type": "tool.start", "name": ev["name"]})
+                    elif ev["type"] == "tool.result":
+                        await _send_json(ws, {
+                            "type": "tool.result",
+                            "name": ev["name"],
+                            "ok": ev["ok"],
+                            "summary": ev.get("summary", ""),
+                        })
 
             # Flush leftover text
             if sentence_buf.strip():
                 await sentence_queue.put(sentence_buf)
 
         except Exception as exc:
-            logger.error("LLM streaming error: %s", exc)
+            logger.error("LLM/SLM streaming error: %s", exc, exc_info=True)
             await _send_json(ws, {"type": "error", "message": f"AI response failed: {exc}"})
         finally:
             # Signal TTS that no more sentences are coming
@@ -109,10 +158,10 @@ async def run_voice_pipeline(
             full_text = "".join(full_response_parts)
             await _send_json(ws, {"type": "llm.done", "text": full_text})
 
-            # Update conversation history (in-memory, per session)
+            # Update conversation history (in-memory, per session, OpenAI format)
             if full_text:
-                conversation_history.append({"role": "user", "parts": [transcript]})
-                conversation_history.append({"role": "model", "parts": [full_text]})
+                conversation_history.append({"role": "user", "content": transcript})
+                conversation_history.append({"role": "assistant", "content": full_text})
 
     # ── Task B: read sentences → TTS → stream audio to client ───────────
     async def _tts_to_client() -> None:
@@ -154,7 +203,7 @@ async def run_voice_pipeline(
             await _send_json(ws, {"type": "tts.done"})
 
     # ── Run both tasks concurrently ──────────────────────────────────────
-    await asyncio.gather(_llm_to_sentences(), _tts_to_client())
+    await asyncio.gather(_produce_text(), _tts_to_client())
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -178,6 +227,8 @@ async def voice_websocket(ws: WebSocket) -> None:
     # ── Per-session state ────────────────────────────────────────────────
     conversation_history: list[dict] = []
     pipeline_task: asyncio.Task | None = None
+    # Single-user placeholder until auth/profiles arrive (Milestone 5).
+    session_context: dict = {"user_id": "local-user"}
 
     # ── Per-session services ─────────────────────────────────────────────
     session_tts = SarvamTTS()
@@ -213,9 +264,9 @@ async def voice_websocket(ws: WebSocket) -> None:
             await session_tts.close()
             await session_tts.connect()
 
-        # Launch LLM → TTS pipeline
+        # Launch SLM/LLM → TTS pipeline
         pipeline_task = asyncio.create_task(
-            run_voice_pipeline(ws, transcript, conversation_history, session_tts)
+            run_voice_pipeline(ws, transcript, conversation_history, session_tts, session_context)
         )
 
     # ── Main loop ────────────────────────────────────────────────────────
