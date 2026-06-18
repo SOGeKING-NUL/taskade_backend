@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
 from db.session import async_session, init_db
 import services.tasks.task_service as task_service
+from services.scheduler.scheduler_service import start_scheduler, shutdown_scheduler
 from services.voice.stt_deepgram import DeepgramStreamingSTT
 from services.voice.tts import SarvamTTS
 from services.ai.llm import OpenRouterLLM
@@ -37,7 +38,11 @@ logger = logging.getLogger("engine")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await init_db()
-    yield
+    start_scheduler()  # read-only due-task detection sweep
+    try:
+        yield
+    finally:
+        shutdown_scheduler()
 
 
 app = FastAPI(title="TTS Speech Engine", version="0.4.0", lifespan=lifespan)
@@ -67,52 +72,6 @@ async def _send_json(ws: WebSocket, data: dict) -> None:
         await ws.send_json(data)
     except Exception:  # noqa: BLE001
         pass
-
-
-async def _announce_due_reminders(
-    ws: WebSocket,
-    tts_service: SarvamTTS,
-    session_context: dict,
-) -> None:
-    """
-    Speak any due-and-unannounced tasks right when a session connects.
-
-    There's no proactive outbound channel yet (that needs the future mobile/
-    WebRTC layer) — so a due reminder is "delivered" the next time the user
-    opens a voice session (Milestone 4). Reuses the same event sequence as a
-    normal turn (llm.token/llm.done, tts.start/.../tts.done) so the existing
-    client UI needs no changes to play it.
-    """
-    user_id = session_context.get("user_id", "local-user")
-    async with async_session() as session:
-        due = await task_service.get_due_reminders(session, user_id)
-        if not due:
-            return
-        briefs = [t.to_brief() for t in due]
-        await task_service.mark_reminded(session, due)
-        await session.commit()
-
-    if len(due) == 1:
-        text = f"Quick reminder before we start — '{due[0].title}' is due."
-    else:
-        titles = "; ".join(t.title for t in due)
-        text = f"Quick reminder before we start — you have {len(due)} things due: {titles}."
-
-    logger.info("Announcing %d due reminder(s) on connect", len(due))
-    await _send_json(ws, {"type": "reminders.due", "tasks": briefs})
-    await _send_json(ws, {"type": "llm.token", "text": text})
-    await _send_json(ws, {"type": "llm.done", "text": text})
-
-    async def _one_sentence():
-        yield text
-
-    first_audio = True
-    async for audio_chunk in tts_service.stream_tts(_one_sentence()):
-        if first_audio:
-            await _send_json(ws, {"type": "tts.start", "sampleRate": settings.SARVAM_TTS_SAMPLE_RATE})
-            first_audio = False
-        await ws.send_bytes(audio_chunk)
-    await _send_json(ws, {"type": "tts.done"})
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -336,9 +295,6 @@ async def voice_websocket(ws: WebSocket) -> None:
         )
         logger.info("STT & TTS WebSockets ready — waiting for speech")
 
-        # Proactive half of Milestone 4 — speak anything due before listening.
-        await _announce_due_reminders(ws, session_tts, session_context)
-
         while True:
             message = await ws.receive()
 
@@ -438,6 +394,29 @@ async def list_tasks(user_id: str = "local-user"):
                 brief["parent_title"] = parent.title if parent else None
             out.append(brief)
     return {"tasks": out}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  Reminders REST (delivery half of Milestone 4)
+# ═════════════════════════════════════════════════════════════════════════
+@app.get("/reminders/due")
+async def due_reminders(user_id: str = "local-user"):
+    """
+    Deliver any due-and-unannounced reminders for a user.
+
+    Calling this IS the act of delivery: it atomically fetches due tasks and
+    marks them reminded, so a second call returns nothing. Invoked "at necessary
+    times" by an external caller (session-start hook, mobile app, manual test) —
+    deliberately NOT auto-triggered by the websocket. The scheduler only detects
+    (read-only); this endpoint is the only thing that consumes/marks reminders.
+    """
+    async with async_session() as session:
+        due, message = await task_service.consume_due_reminders(session, user_id)
+        briefs = [t.to_brief() for t in due]
+        await session.commit()
+    if due:
+        logger.info("Delivered %d due reminder(s) via /reminders/due", len(due))
+    return {"count": len(due), "tasks": briefs, "message": message}
 
 
 # ═════════════════════════════════════════════════════════════════════════

@@ -193,3 +193,32 @@ async def mark_reminded(session: AsyncSession, tasks: list[Task]) -> None:
     for t in tasks:
         t.last_reminded_at = now
     await session.flush()
+
+
+def _reminder_message(tasks: list[Task]) -> str:
+    """Build the spoken-style summary for a set of due tasks (singular vs plural)."""
+    if len(tasks) == 1:
+        return f"Quick reminder — '{tasks[0].title}' is due."
+    titles = "; ".join(t.title for t in tasks)
+    return f"Quick reminder — you have {len(tasks)} things due: {titles}."
+
+
+async def consume_due_reminders(
+    session: AsyncSession, user_id: str
+) -> tuple[list[Task], str]:
+    """
+    Fetch due-and-unreminded tasks AND mark them reminded in one transaction.
+
+    Calling this *is* the act of delivering the reminder — whoever decides "now
+    is a necessary time" (a session-start hook, the mobile app, a manual test)
+    calls it via the REST endpoint. The scheduler never calls this; it only
+    detects (read-only). Keeping the "mark reminded" side-effect exclusively
+    here avoids two halves racing to swallow the same reminder.
+
+    Returns (tasks, spoken_message). Caller is responsible for committing.
+    """
+    due = await get_due_reminders(session, user_id)
+    if not due:
+        return [], ""
+    await mark_reminded(session, due)
+    return due, _reminder_message(due)

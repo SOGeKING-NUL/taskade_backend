@@ -62,6 +62,10 @@ class Settings:
         "postgresql+asyncpg://postgres:postgres@localhost:5432/taskade",
     )
 
+    # ── Reminder scheduler (Milestone 4) ─────────────────────────
+    # How often the read-only due-task detection sweep runs.
+    REMINDER_SWEEP_SECONDS: int = int(os.getenv("REMINDER_SWEEP_SECONDS", "60"))
+
     # ── Server ───────────────────────────────────────────────────
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
