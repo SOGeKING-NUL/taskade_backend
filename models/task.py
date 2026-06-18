@@ -54,6 +54,10 @@ class Task(Base):
     window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Set once a due reminder for this task has been spoken to the user, so a
+    # proactive sweep never re-announces the same reminder (Milestone 4).
+    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # manual_confirm | auto_detect  (only manual is implemented today)
     completion_condition: Mapped[str] = mapped_column(String, default="manual_confirm")
     requires_research: Mapped[bool] = mapped_column(Boolean, default=False)

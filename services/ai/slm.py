@@ -11,26 +11,36 @@ Streams provider-agnostic events:
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 from openai import AsyncOpenAI, APIError
 
-from config import settings
+from core.config import settings
 from services.tools.schemas import ESCALATE_TOOL
 
 logger = logging.getLogger(__name__)
 
-_SLM_SYSTEM_PROMPT = (
-    settings.LLM_SYSTEM_PROMPT
-    + "\n\nYou are the fast first responder in a voice assistant. Answer the user "
-    "directly and conversationally for chat, greetings, and general/factual "
-    "questions — even if your knowledge may be a little out of date, just answer. "
-    "ONLY call the escalate_to_assistant tool when the user clearly wants to "
-    "CREATE, UPDATE, COMPLETE, or LIST/LOOK UP a task or reminder (e.g. 'remind "
-    "me to…', 'add a task…', 'what's on my list', 'mark X done'). When you "
-    "escalate, call the tool and say nothing else — never narrate that you are "
-    "escalating."
-)
+
+def _build_system_prompt() -> str:
+    today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
+    return (
+        settings.LLM_SYSTEM_PROMPT
+        + f"\n\nToday's date is {today}."
+        + "\n\nYou are the fast first responder in a voice assistant. Answer the "
+        "user directly and conversationally for chat, greetings, and general/"
+        "factual questions — even if your knowledge may be a little out of date, "
+        "just answer. ONLY call the escalate_to_assistant tool when the user "
+        "clearly wants to CREATE, UPDATE, COMPLETE, or LIST/LOOK UP a task or "
+        "reminder (e.g. 'remind me to…', 'add a task…', 'what's on my list', "
+        "'mark X done'). Also escalate if your own previous message asked the "
+        "user a yes/no question about setting up a task or reminder and they're "
+        "now answering it (e.g. a bare 'yes', 'sure', 'go ahead', 'no thanks') — "
+        "escalate even though their reply alone has no task keywords, since only "
+        "the other assistant can act on that confirmation. When you escalate, "
+        "call the tool and say nothing else — never narrate that you are "
+        "escalating."
+    )
 
 
 class GroqSLM:
@@ -49,7 +59,7 @@ class GroqSLM:
         user_message: str,
         conversation_history: list[dict] | None = None,
     ) -> AsyncGenerator[dict, None]:
-        messages = [{"role": "system", "content": _SLM_SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": _build_system_prompt()}]
         messages += list(conversation_history or [])
         messages.append({"role": "user", "content": user_message})
 

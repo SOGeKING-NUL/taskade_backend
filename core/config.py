@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-_server_dir = Path(__file__).resolve().parent
-load_dotenv(_server_dir / ".env")
+# core/config.py → core/ → project root
+_project_root = Path(__file__).resolve().parent.parent
+load_dotenv(_project_root / ".env")
 
 
 class Settings:
@@ -47,6 +48,12 @@ class Settings:
     OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     # Pick a cheap, capable tool-calling model from OpenRouter's current catalog.
     OPENROUTER_LLM_MODEL: str = os.getenv("OPENROUTER_LLM_MODEL", "openai/gpt-4o-mini")
+    # Research model — a high-intelligence LLM that web-searches itself via the
+    # `:online` suffix (reuses the key above; no third-party search vendor).
+    # A Claude model uses Anthropic's native search.
+    OPENROUTER_RESEARCH_MODEL: str = os.getenv(
+        "OPENROUTER_RESEARCH_MODEL", "anthropic/claude-sonnet-4.6:online"
+    )
 
     # ── Database (Postgres, async) ───────────────────────────────
     # Format: postgresql+asyncpg://USER:PASSWORD@HOST:PORT/DBNAME

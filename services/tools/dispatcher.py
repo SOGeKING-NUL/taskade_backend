@@ -7,6 +7,7 @@ error handling so a failed tool call yields a graceful result the LLM can speak
 import logging
 
 from .task_tools import create_task, query_tasks, update_task_status
+from .research_tools import research
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ TOOL_REGISTRY = {
     "create_task": create_task,
     "query_tasks": query_tasks,
     "update_task_status": update_task_status,
+    "research": research,
 }
 
 

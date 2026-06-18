@@ -9,9 +9,9 @@ tool-calling layer already expects (with a `summary` for the LLM to speak).
 import logging
 from datetime import datetime
 
-from db import async_session
+from db.session import async_session
 from models.task import Task
-import services.task_service as svc
+import services.tasks.task_service as svc
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,15 @@ def _user(session_context: dict) -> str:
 
 async def create_task(args: dict, session_context: dict) -> dict:
     user_id = _user(session_context)
+
+    # Stash research findings (from a prior `research` tool call this turn) onto
+    # the task's freeform context JSONB, so the task carries its sources.
+    context = None
+    research_summary = args.get("research_summary")
+    source_links = args.get("source_links")
+    if research_summary or source_links:
+        context = {"research": {"summary": research_summary, "links": source_links or []}}
+
     async with async_session() as session:
         task, parent = await svc.create_task(
             session,
@@ -42,6 +51,7 @@ async def create_task(args: dict, session_context: dict) -> dict:
             depends_on=args.get("depends_on_task"),
             due_at=_parse_dt(args.get("due_at")),
             needs_research=bool(args.get("needs_research", False)),
+            context=context,
         )
         await session.commit()
         nested = f" (nested under '{parent.title}')" if parent else ""

@@ -62,7 +62,16 @@ TASK_TOOL_DECLARATIONS = [
                     },
                     "needs_research": {
                         "type": "boolean",
-                        "description": "True if external/current info is needed to fill in dates/details (used in a later milestone).",
+                        "description": "True if external/current info is needed to fill in dates/details.",
+                    },
+                    "research_summary": {
+                        "type": "string",
+                        "description": "If you called the research tool first, the key findings to store on this task.",
+                    },
+                    "source_links": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Official/source URLs from research to store on this task.",
                     },
                 },
                 "required": ["title"],
@@ -121,6 +130,30 @@ TASK_TOOL_DECLARATIONS = [
 ]
 
 
+RESEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "research",
+        "description": (
+            "Look up current, real-world information using live web search — exam "
+            "dates, deadlines, prices, schedules, requirements, etc. Call this "
+            "BEFORE create_task whenever a task depends on facts or dates you don't "
+            "already know, then pass the findings into create_task."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A specific, self-contained search query.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
 def get_tool_declarations() -> list[dict]:
     """The tool set advertised to the OpenRouter LLM."""
-    return TASK_TOOL_DECLARATIONS
+    return TASK_TOOL_DECLARATIONS + [RESEARCH_TOOL]

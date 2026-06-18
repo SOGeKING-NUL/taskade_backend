@@ -16,23 +16,58 @@ OpenRouter base URL. (No Gemini — the user has no Gemini credits.)
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 from openai import AsyncOpenAI
 
-from config import settings
+from core.config import settings
 from services.tools.schemas import get_tool_declarations
 from services.tools.dispatcher import execute_tool
 
 logger = logging.getLogger(__name__)
 
-_LLM_SYSTEM_PROMPT = (
-    settings.LLM_SYSTEM_PROMPT
-    + "\n\nYou are the action-taking part of a voice assistant. Use the provided "
-    "tools to create, update, and look up the user's tasks and reminders. After "
-    "running tools, give a short, natural spoken confirmation of what you did "
-    "(1-2 sentences). Don't read out IDs or JSON."
-)
+
+def _build_system_prompt() -> str:
+    # Computed per-call (not at import time) so the date never goes stale on a
+    # long-running process — the model needs "today" to resolve recurring
+    # events ("the December JLPT") and to know whether to escalate a yes/no
+    # confirmation from the prior turn.
+    today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
+    return (
+        settings.LLM_SYSTEM_PROMPT
+        + f"\n\nToday's date is {today}. Resolve relative or recurring-event "
+        "dates ('this December', 'next month') against THIS date, not your "
+        "training data, which is stale and biases you toward a past occurrence."
+        + "\n\nYou are the action-taking part of a voice assistant. Use the "
+        "provided tools to create, update, and look up the user's tasks and "
+        "reminders.\n"
+        "- Only call `create_task` when the user explicitly asks you to "
+        "create/add/set up a task or reminder, OR when you just asked if "
+        "they'd like one and they confirmed (e.g. 'yes', 'please', 'go "
+        "ahead'). If they decline or didn't ask for one, don't create "
+        "anything — answering their question is enough.\n"
+        "- If the user is only asking a factual question ('when is X', "
+        "'what's the deadline for Y') and hasn't asked you to remember or "
+        "track it, do NOT create a task. Call `research` if you need current "
+        "facts, answer conversationally, then ask if they'd like a reminder "
+        "set up for it — and wait for their answer before calling "
+        "create_task.\n"
+        "- When a task depends on real-world facts or dates you don't already "
+        "know (exam dates, deadlines, prices, schedules), call `research` "
+        "first to find them — regardless of whether a task ends up getting "
+        "created — and if one does, pass the findings into create_task as "
+        "`research_summary`/`source_links` and set `due_at` if you learned a "
+        "concrete date.\n"
+        "- When an event has a real-world prerequisite (most formal exams or "
+        "applications require registering by an earlier deadline before the "
+        "event itself), create TWO tasks: one for the prerequisite step and "
+        "one for the event, with the event's `depends_on_task` set to the "
+        "prerequisite so it stays blocked until that's done. Mention this "
+        "plan briefly when confirming.\n"
+        "- After running tools, give a short, natural spoken confirmation of "
+        "what you did (1-2 sentences). Don't read out IDs, URLs, or JSON."
+    )
 
 # Cap tool-call iterations to avoid runaway loops.
 _MAX_TOOL_ROUNDS = 5
@@ -47,8 +82,11 @@ class OpenRouterLLM:
             base_url=settings.OPENROUTER_BASE_URL,
         )
         self.model = settings.OPENROUTER_LLM_MODEL
-        self.system_prompt = _LLM_SYSTEM_PROMPT
         logger.info("OpenRouter LLM initialised  model=%s", self.model)
+
+    @property
+    def system_prompt(self) -> str:
+        return _build_system_prompt()
 
     async def run_conversation(
         self,

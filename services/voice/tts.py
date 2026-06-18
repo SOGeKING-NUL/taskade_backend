@@ -30,7 +30,7 @@ from urllib.parse import urlencode
 
 import websockets
 
-from config import settings
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 

@@ -168,3 +168,28 @@ async def update_status(
 
     logger.info("update_status → %s = %s (unblocked %d)", task.title, new_status, len(unblocked))
     return task, unblocked
+
+
+async def get_due_reminders(session: AsyncSession, user_id: str) -> list[Task]:
+    """Open tasks that are due (or overdue) and haven't been announced yet."""
+    now = datetime.now(timezone.utc)
+    rows = (
+        await session.execute(
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.status.in_(("pending", "active")),
+                Task.due_at.is_not(None),
+                Task.due_at <= now,
+                Task.last_reminded_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def mark_reminded(session: AsyncSession, tasks: list[Task]) -> None:
+    """Stamp tasks as announced so a later sweep/connect doesn't repeat them."""
+    now = datetime.now(timezone.utc)
+    for t in tasks:
+        t.last_reminded_at = now
+    await session.flush()
