@@ -65,11 +65,35 @@ Research = a plain high-intelligence **Claude** LLM call with `:online` (Anthrop
 - [ ] **USER VERIFY:** backdate a task's `due_at` in DB → within `REMINDER_SWEEP_SECONDS` server log shows detection (no DB change) → `GET /reminders/due` returns it + message → call again → empty (consumed)
 - [ ] **STOP — get approval**
 
-## Milestone 5 — Personal profile & memory
-- [ ] `models/user_profile.py` — structured profile (name, tz, sentiment, prefs)
-- [ ] `services/memory_service.py` — Mem0 + pgvector `remember()`/`recall()`
-- [ ] `services/sentiment_service.py` — periodic batch sentiment rollup
-- [ ] `main.py` — profile read into session context; fire-and-forget memory write post-turn
-- [ ] Tools pull `recall()` context before research/create_task
-- [ ] Verify: state a preference → new session → recall surfaces it during a relevant task
+## Milestone 5 — Personal profile & memory  ⟵ BUILT (pending user verify)
+- [x] `models/user_profile.py` — structured profile (name, tz, locale, rolling sentiment, prefs, `daily_checkin_hour`, `last_refresh_on`)
+- [x] `models/user_memory.py` — free-form extracted facts (text + kind); `models/mood_log.py` — per-turn sentiment signal
+- [x] `services/memory/profile_service.py` — profile ensure/read + sentiment/refresh writes (pure DB, hot-path safe)
+- [x] `services/memory/memory_service.py` — `recall()` (fast DB read) / `remember()` (LLM fact-extraction, fire-and-forget, dedup)
+- [x] **DEVIATION from plan:** lightweight Postgres-backed memory instead of **Mem0 + pgvector** — same `remember()`/`recall()` contract, swappable later. Rationale: Mem0+embeddings is the third-party complexity the user rejected for research, and neither Groq nor OpenRouter cleanly offer embeddings. No new heavy deps.
+- [x] `services/memory/sentiment_service.py` — `note_sentiment()` (cheap per-turn SLM, fire-and-forget) + `rollup_sentiment()` (periodic batch LLM summary → profile)
+- [x] **Daily research refresh** (`services/research/refresh_service.py`) — the "6am, has registration opened?" check: re-researches watched tasks (`requires_research=True`, open) and applies concrete updates (new `due_at`, fresh findings in `context`). Scheduler fires hourly, self-gates to the user's local `daily_checkin_hour` (per-user time, restart-safe via `last_refresh_on`).
+- [x] `services/scheduler/scheduler_service.py` — added `daily_task_refresh` (cron, hourly self-gating) + `sentiment_rollup` (interval) jobs alongside the due-sweep
+- [x] `main.py` — profile read into session context at connect; recalled facts + profile injected into the escalated LLM context (so research/create_task see them); fire-and-forget `remember()` + `note_sentiment()` post-turn
+- [x] `core/config.py` — `MEMORY_RECALL_LIMIT`, `DAILY_CHECKIN_HOUR`, `SENTIMENT_ROLLUP_SECONDS`, `SENTIMENT_WINDOW_DAYS`; `requirements.txt` — `tzdata` (zoneinfo on Windows)
+- [ ] **USER VERIFY:** state a preference ("I prefer concise answers") → new session → it's recalled and shapes a relevant turn; set a `requires_research` task + `daily_checkin_hour` to the current hour → daily job logs a refresh
 - [ ] **STOP — done**
+
+## Milestone 6 — Auth (Google sign-in via Auth0)  ⟵ BUILT (pending user verify)
+Real multi-user auth, replacing the hardcoded `"local-user"` placeholder everywhere.
+
+**Switched from Supabase Auth to Auth0 mid-milestone** (user call — Supabase's Google provider requires standing up your own Google Cloud OAuth client; Auth0 ships dev keys for its Google social connection, less setup). Auth0 React SDK (Authorization Code + PKCE) handles login entirely client-side; this backend only ever verifies the resulting **ID token** against Auth0's public JWKS (RS256) — never talks to Auth0's token endpoint or Google directly. No separate Auth0 API resource was configured, so we verify the ID token (audience = the Auth0 client id) rather than a resource-server access token — sufficient for "who is this," which is all this app needs.
+
+- [x] `models/user.py` — added `email` column (comment updated: `id` is now the Auth0 `sub` claim, e.g. `"google-oauth2|123"`, not a Supabase UUID); `db/session.py` — `ALTER TABLE users ADD COLUMN IF NOT EXISTS email`
+- [x] `core/config.py` — `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET` (secret stored for future use, unused by the PKCE+JWKS verification flow itself); `requirements.txt` — `pyjwt[crypto]>=2.8.0` (crypto extra needed for RS256)
+- [x] `services/auth/auth_service.py` — `decode_token()` (`jwt.PyJWKClient` fetches/caches Auth0's JWKS, verifies RS256 + `aud`/`iss`), `profile_fields()` (pulls `email`/`name` off claims), `get_current_user_id()` (FastAPI `Depends`, reads `Authorization: Bearer`), `authenticate_websocket()` (reads `?token=` since browsers can't set custom WS headers; closes with code 1008 *before* `accept()` on missing/invalid token)
+- [x] `services/tasks/task_service.py` — `ensure_user()` now accepts `email`; added `list_user_ids()` for the scheduler's per-user loops
+- [x] `services/memory/profile_service.py` — `ensure_profile()` accepts `display_name`/`email`, seeded from claims on first contact
+- [x] `main.py` — `/ws/voice` verifies the token before `ws.accept()`, uses the verified `sub` as `user_id` (no more hardcoded placeholder); profile load seeds name/email from claims; `GET /tasks` and `GET /reminders/due` switched from a trusted `user_id` query param to `Depends(get_current_user_id)`
+- [x] **Multi-user scheduler:** `services/scheduler/scheduler_service.py` — all three jobs (`check_due_tasks`, `daily_task_refresh`, `sentiment_rollup`) now loop over every row in `users` via `list_user_ids()` instead of one hardcoded user
+- [x] Frontend: `@auth0/auth0-react` added (replaces `@supabase/supabase-js`, removed); `main.jsx` wraps the app in `Auth0Provider`; `Login.jsx` calls `loginWithRedirect({ authorizationParams: { connection: "google-oauth2" } })` to skip straight to Google; `App.jsx` reads `isAuthenticated`/`getIdTokenClaims()`/`logout()`, gates the launch screen behind sign-in, passes the raw ID token down; `VoiceChat.jsx` unchanged (already took a generic `accessToken` prop) — appends `?token=` to the WS URL and sends `Authorization: Bearer` on `GET /tasks`
+- [x] `.env`/`.env.example` (backend + `client/`) — `AUTH0_DOMAIN`/`AUTH0_CLIENT_ID`/`AUTH0_CLIENT_SECRET` and `VITE_AUTH0_DOMAIN`/`VITE_AUTH0_CLIENT_ID`; Postgres (`DATABASE_URL`) stays on Supabase — only auth moved, not the DB
+- [x] Verified: `npm run build` clean on the client; `python -c "import main"` clean in the real venv (no import-time errors)
+- [ ] **Not done by this backend (Auth0 dashboard config, outside the codebase):** add your dev URL (e.g. `http://localhost:5173`) to **Allowed Callback URLs**, **Allowed Logout URLs**, and **Allowed Web Origins** on the Auth0 application; confirm the Google social connection is enabled (Authentication → Social)
+- [ ] **USER VERIFY:** click "Sign in with Google" → completes OAuth → lands on the launch screen → "Start Conversation" connects the WS successfully → `/tasks` loads without a 401
+- [ ] **STOP — get approval**

@@ -9,3 +9,5 @@ asyncpg>=0.29.0
 python-multipart>=0.0.9
 sarvamai>=0.1.26
 apscheduler>=3.10.0
+tzdata>=2024.1  # zoneinfo timezone DB (required on Windows)
+pyjwt[crypto]>=2.8.0

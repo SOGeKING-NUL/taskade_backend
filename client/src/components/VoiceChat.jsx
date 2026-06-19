@@ -26,7 +26,7 @@ const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 // Pre-speech ring buffer: ~500ms of audio frames for capturing speech onset
 const RING_BUFFER_FRAMES = 15; // 15 frames × 32ms = ~480ms
 
-export default function VoiceChat() {
+export default function VoiceChat({ accessToken }) {
   // ── State ──────────────────────────────────────────────────────────
   const [messages, setMessages] = useState([]);
   const [status, setStatus] = useState("idle"); // idle|listening|recording|processing|speaking
@@ -93,13 +93,15 @@ export default function VoiceChat() {
   // ── Fetch persisted tasks for the panel ────────────────────────────
   const fetchTasks = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/tasks`);
+      const res = await fetch(`${API_BASE}/tasks`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
       const data = await res.json();
       setTasks(data.tasks || []);
     } catch (err) {
       console.warn("Failed to fetch tasks:", err);
     }
-  }, []);
+  }, [accessToken]);
 
   // Initial load
   useEffect(() => {
@@ -247,7 +249,8 @@ export default function VoiceChat() {
 
     const connect = () => {
       if (closed) return;
-      ws = new WebSocket(WS_URL);
+      const url = `${WS_URL}?token=${encodeURIComponent(accessToken)}`;
+      ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
@@ -301,7 +304,7 @@ export default function VoiceChat() {
       clearTimeout(reconnectTimer);
       if (ws) ws.close();
     };
-  }, [handleMessage]);
+  }, [handleMessage, accessToken]);
 
   // ── VAD lifecycle ──────────────────────────────────────────────────
   useEffect(() => {

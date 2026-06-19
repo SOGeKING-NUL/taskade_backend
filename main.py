@@ -15,12 +15,16 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import settings
 from db.session import async_session, init_db
 import services.tasks.task_service as task_service
+import services.memory.profile_service as profile_service
+import services.memory.memory_service as memory_service
+import services.memory.sentiment_service as sentiment_service
+from services.auth.auth_service import authenticate_websocket, get_current_user_id, profile_fields
 from services.scheduler.scheduler_service import start_scheduler, shutdown_scheduler
 from services.voice.stt_deepgram import DeepgramStreamingSTT
 from services.voice.tts import SarvamTTS
@@ -72,6 +76,41 @@ async def _send_json(ws: WebSocket, data: dict) -> None:
         await ws.send_json(data)
     except Exception:  # noqa: BLE001
         pass
+
+
+async def _memory_context(session_context: dict) -> str:
+    """
+    Build a short system block of what we know about the user (Milestone 5),
+    injected only when we escalate to the tool-calling LLM — so `research` /
+    `create_task` run with the user's known prefs/facts in view. Profile fields
+    come free from session context; recalled facts are a fast DB read.
+    """
+    user_id = session_context["user_id"]
+    profile = session_context.get("profile") or {}
+
+    lines: list[str] = []
+    if profile.get("display_name"):
+        lines.append(f"User's name: {profile['display_name']}.")
+    if profile.get("timezone"):
+        lines.append(f"Timezone: {profile['timezone']}.")
+    if profile.get("sentiment_summary"):
+        lines.append(f"Recent mood: {profile['sentiment_summary']}")
+    prefs = profile.get("preferences") or {}
+    if prefs:
+        lines.append(f"Preferences: {prefs}.")
+
+    try:
+        async with async_session() as session:
+            facts = await memory_service.recall(session, user_id)
+        if facts:
+            lines.append("Things to remember about the user:")
+            lines += [f"- {f}" for f in facts]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("recall failed: %s", exc)
+
+    if not lines:
+        return ""
+    return "What you know about the user (use it to personalize, don't recite it):\n" + "\n".join(lines)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -136,6 +175,9 @@ async def run_voice_pipeline(
                 await _send_json(ws, {"type": "escalated", "intent": escalation.get("intent_summary", "")})
 
                 messages = [{"role": "system", "content": llm_service.system_prompt}]
+                memory_msg = await _memory_context(session_context)
+                if memory_msg:
+                    messages.append({"role": "system", "content": memory_msg})
                 messages += list(conversation_history)
                 messages.append({
                     "role": "user",
@@ -176,6 +218,13 @@ async def run_voice_pipeline(
             if full_text:
                 conversation_history.append({"role": "user", "content": transcript})
                 conversation_history.append({"role": "assistant", "content": full_text})
+
+                # Milestone 5 — learn from the turn WITHOUT blocking it. Both are
+                # fire-and-forget: a slow extraction call must never delay the
+                # next user turn. Exceptions inside are swallowed by the services.
+                user_id = session_context["user_id"]
+                asyncio.create_task(memory_service.remember(user_id, transcript, full_text))
+                asyncio.create_task(sentiment_service.note_sentiment(user_id, transcript))
 
     # ── Task B: read sentences → TTS → stream audio to client ───────────
     async def _tts_to_client() -> None:
@@ -235,14 +284,20 @@ async def voice_websocket(ws: WebSocket) -> None:
       - Deepgram's built-in endpointing detects end-of-turn
       - utterance_end event triggers the LLM → TTS pipeline
     """
+    # Verify the Supabase JWT (carried as ?token=, since browsers can't attach
+    # custom headers to a WS upgrade request) BEFORE accepting the connection.
+    claims = await authenticate_websocket(ws)
+    if claims is None:
+        return  # already closed by authenticate_websocket
+
     await ws.accept()
-    logger.info("Client connected")
+    user_id = claims["sub"]
+    logger.info("Client connected (user=%s)", user_id)
 
     # ── Per-session state ────────────────────────────────────────────────
     conversation_history: list[dict] = []
     pipeline_task: asyncio.Task | None = None
-    # Single-user placeholder until auth/profiles arrive (Milestone 5).
-    session_context: dict = {"user_id": "local-user"}
+    session_context: dict = {"user_id": user_id}
 
     # ── Per-session services ─────────────────────────────────────────────
     session_tts = SarvamTTS()
@@ -285,6 +340,18 @@ async def voice_websocket(ws: WebSocket) -> None:
 
     # ── Main loop ────────────────────────────────────────────────────────
     try:
+        # Load the user's profile once into session context (Milestone 5) — the
+        # only memory read on the connect path; per-turn recall is separate.
+        # On first contact, seed display_name/email from the Google claims.
+        try:
+            fields = profile_fields(claims)
+            async with async_session() as session:
+                profile = await profile_service.ensure_profile(session, user_id, **fields)
+                session_context["profile"] = profile.to_context()
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("profile load failed: %s", exc)
+
         # Connect TTS eagerly (it's used for every response)
         await session_tts.connect()
         # Connect STT eagerly since we stream continuously
@@ -381,8 +448,8 @@ async def health_check():
 #  Tasks REST (read-only — powers the frontend test panel)
 # ═════════════════════════════════════════════════════════════════════════
 @app.get("/tasks")
-async def list_tasks(user_id: str = "local-user"):
-    """Return all tasks for a user, with parent titles, for the UI panel."""
+async def list_tasks(user_id: str = Depends(get_current_user_id)):
+    """Return all tasks for the authenticated user, with parent titles, for the UI panel."""
     async with async_session() as session:
         tasks = await task_service.get_tasks(session, user_id, scope="all")
         out = []
@@ -400,9 +467,9 @@ async def list_tasks(user_id: str = "local-user"):
 #  Reminders REST (delivery half of Milestone 4)
 # ═════════════════════════════════════════════════════════════════════════
 @app.get("/reminders/due")
-async def due_reminders(user_id: str = "local-user"):
+async def due_reminders(user_id: str = Depends(get_current_user_id)):
     """
-    Deliver any due-and-unannounced reminders for a user.
+    Deliver any due-and-unannounced reminders for the authenticated user.
 
     Calling this IS the act of delivery: it atomically fetches due tasks and
     marks them reminded, so a second call returns nothing. Invoked "at necessary

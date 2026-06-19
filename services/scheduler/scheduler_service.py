@@ -23,32 +23,90 @@ last_reminded_at), so the schedule simply re-registers itself on each boot.
 """
 
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from core.config import settings
 from db.session import async_session
 import services.tasks.task_service as task_service
+import services.memory.profile_service as profile_service
+import services.memory.sentiment_service as sentiment_service
+from services.research.refresh_service import refresh_watched_tasks
 
 logger = logging.getLogger("scheduler")
-
-# Single-user placeholder until auth/profiles arrive (Milestone 5); consistent
-# with the "local-user" default used across the websocket + REST layers.
-_USER_ID = "local-user"
 
 _scheduler: AsyncIOScheduler | None = None
 
 
-async def check_due_tasks() -> None:
-    """Read-only sweep: log anything currently due. Never mutates state."""
+async def _all_user_ids() -> list[str]:
     async with async_session() as session:
-        due = await task_service.get_due_reminders(session, _USER_ID)
-    if due:
-        logger.info(
-            "Sweep: %d due reminder(s) pending delivery — %s",
-            len(due),
-            "; ".join(t.title for t in due),
-        )
+        return await task_service.list_user_ids(session)
+
+
+async def check_due_tasks() -> None:
+    """Read-only sweep: log anything currently due, for every user. Never mutates."""
+    for user_id in await _all_user_ids():
+        async with async_session() as session:
+            due = await task_service.get_due_reminders(session, user_id)
+        if due:
+            logger.info(
+                "Sweep: %d due reminder(s) pending delivery for %s — %s",
+                len(due),
+                user_id,
+                "; ".join(t.title for t in due),
+            )
+
+
+def _local_now(tz_name: str) -> datetime:
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except (ZoneInfoNotFoundError, ValueError):
+        return datetime.now(ZoneInfo("UTC"))
+
+
+async def _refresh_one_user(user_id: str) -> None:
+    """
+    Per-user daily research refresh — this job runs hourly for every user, but
+    each user only actually refreshes once a day at THEIR configured local
+    check-in hour (the "6am, has registration opened?" check).
+    """
+    async with async_session() as session:
+        profile = await profile_service.ensure_profile(session, user_id)
+        hour = profile_service.checkin_hour(profile)
+        local = _local_now(profile.timezone)
+        already = profile.last_refresh_on == local.date()
+        await session.commit()
+
+    if local.hour != hour or already:
+        return
+
+    logger.info(
+        "Daily check-in hour reached for %s (%02d:00 %s) — refreshing",
+        user_id, hour, profile.timezone,
+    )
+    try:
+        updated = await refresh_watched_tasks(user_id)
+        logger.info("Daily refresh complete for %s — %d task(s) updated", user_id, updated)
+    finally:
+        async with async_session() as session:
+            await profile_service.mark_refreshed(session, user_id, local.date())
+            await session.commit()
+
+
+async def daily_task_refresh() -> None:
+    """Fan out the per-user daily refresh check across every known user."""
+    for user_id in await _all_user_ids():
+        await _refresh_one_user(user_id)
+
+
+async def sentiment_rollup() -> None:
+    """Periodic batch: fold recent mood signals into each user's profile."""
+    for user_id in await _all_user_ids():
+        async with async_session() as session:
+            await sentiment_service.rollup_sentiment(session, user_id)
+            await session.commit()
 
 
 def start_scheduler() -> AsyncIOScheduler:
@@ -58,6 +116,8 @@ def start_scheduler() -> AsyncIOScheduler:
         return _scheduler
 
     _scheduler = AsyncIOScheduler()
+
+    # Cheap, frequent due-task detection (read-only).
     _scheduler.add_job(
         check_due_tasks,
         trigger="interval",
@@ -67,9 +127,36 @@ def start_scheduler() -> AsyncIOScheduler:
         coalesce=True,           # collapse missed runs into one
         max_instances=1,         # never overlap sweeps
     )
+
+    # Daily research refresh — fires hourly, self-gates to the user's local
+    # check-in hour (per-user time-of-day, restart-safe via last_refresh_on).
+    _scheduler.add_job(
+        daily_task_refresh,
+        trigger="cron",
+        minute=0,
+        id="daily_task_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    # Periodic sentiment rollup (batch — never per message).
+    _scheduler.add_job(
+        sentiment_rollup,
+        trigger="interval",
+        seconds=settings.SENTIMENT_ROLLUP_SECONDS,
+        id="sentiment_rollup",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
     _scheduler.start()
     logger.info(
-        "Reminder sweep started — every %ds", settings.REMINDER_SWEEP_SECONDS
+        "Scheduler started — due-sweep %ds, daily refresh @local-hour, "
+        "sentiment rollup %ds",
+        settings.REMINDER_SWEEP_SECONDS,
+        settings.SENTIMENT_ROLLUP_SECONDS,
     )
     return _scheduler
 

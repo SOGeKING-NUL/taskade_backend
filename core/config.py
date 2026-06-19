@@ -55,6 +55,15 @@ class Settings:
         "OPENROUTER_RESEARCH_MODEL", "anthropic/claude-sonnet-4.6:online"
     )
 
+    # ── Auth (Auth0 — Google sign-in via Auth0's social connection) ──
+    # Frontend (Auth0 React SDK, PKCE) logs the user in; this backend only
+    # verifies the resulting ID token against Auth0's public JWKS (RS256).
+    # CLIENT_SECRET isn't used by the verification flow (PKCE needs no
+    # secret) but is kept here for any future server-side Auth0 API calls.
+    AUTH0_DOMAIN: str = os.getenv("AUTH0_DOMAIN", "")
+    AUTH0_CLIENT_ID: str = os.getenv("AUTH0_CLIENT_ID", "")
+    AUTH0_CLIENT_SECRET: str = os.getenv("AUTH0_CLIENT_SECRET", "")
+
     # ── Database (Postgres, async) ───────────────────────────────
     # Format: postgresql+asyncpg://USER:PASSWORD@HOST:PORT/DBNAME
     DATABASE_URL: str = os.getenv(
@@ -65,6 +74,16 @@ class Settings:
     # ── Reminder scheduler (Milestone 4) ─────────────────────────
     # How often the read-only due-task detection sweep runs.
     REMINDER_SWEEP_SECONDS: int = int(os.getenv("REMINDER_SWEEP_SECONDS", "60"))
+
+    # ── Profile & memory (Milestone 5) ───────────────────────────
+    # How many remembered facts to inject into the LLM context per turn.
+    MEMORY_RECALL_LIMIT: int = int(os.getenv("MEMORY_RECALL_LIMIT", "10"))
+    # Default local hour for the daily research refresh when a profile sets none.
+    DAILY_CHECKIN_HOUR: int = int(os.getenv("DAILY_CHECKIN_HOUR", "6"))
+    # How often the batch sentiment rollup runs (default hourly).
+    SENTIMENT_ROLLUP_SECONDS: int = int(os.getenv("SENTIMENT_ROLLUP_SECONDS", "3600"))
+    # Lookback window for aggregating mood signals.
+    SENTIMENT_WINDOW_DAYS: int = int(os.getenv("SENTIMENT_WINDOW_DAYS", "7"))
 
     # ── Server ───────────────────────────────────────────────────
     HOST: str = os.getenv("HOST", "0.0.0.0")

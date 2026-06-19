@@ -20,10 +20,21 @@ VALID_STATUSES = {"pending", "blocked", "active", "done", "cancelled"}
 _CLOSED = ("done", "cancelled")
 
 
-async def ensure_user(session: AsyncSession, user_id: str, display_name: str | None = None) -> User:
+async def list_user_ids(session: AsyncSession) -> list[str]:
+    """All known user ids — drives the scheduler's per-user job loops."""
+    rows = (await session.execute(select(User.id))).scalars().all()
+    return list(rows)
+
+
+async def ensure_user(
+    session: AsyncSession,
+    user_id: str,
+    display_name: str | None = None,
+    email: str | None = None,
+) -> User:
     user = await session.get(User, user_id)
     if user is None:
-        user = User(id=user_id, display_name=display_name)
+        user = User(id=user_id, display_name=display_name, email=email)
         session.add(user)
         await session.flush()
     return user

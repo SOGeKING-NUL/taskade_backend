@@ -27,7 +27,7 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 
 def _user(session_context: dict) -> str:
-    return session_context.get("user_id", "local-user")
+    return session_context["user_id"]
 
 
 async def create_task(args: dict, session_context: dict) -> dict:

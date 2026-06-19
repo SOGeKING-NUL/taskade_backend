@@ -30,4 +30,7 @@ async def init_db() -> None:
         await conn.execute(
             text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_reminded_at TIMESTAMPTZ")
         )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR")
+        )
     logger.info("Database ready — tables ensured")
