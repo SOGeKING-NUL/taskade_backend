@@ -9,7 +9,12 @@ createRoot(document.getElementById("root")).render(
     <Auth0Provider
       domain={import.meta.env.VITE_AUTH0_DOMAIN}
       clientId={import.meta.env.VITE_AUTH0_CLIENT_ID}
-      authorizationParams={{ redirect_uri: window.location.origin }}
+      authorizationParams={{
+        redirect_uri: window.location.origin,
+        scope: "openid profile email offline_access",
+      }}
+      cacheLocation="localstorage"
+      useRefreshTokens
     >
       <App />
     </Auth0Provider>

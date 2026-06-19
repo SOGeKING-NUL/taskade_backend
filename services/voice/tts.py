@@ -162,8 +162,11 @@ class SarvamTTS:
             raise RuntimeError("TTS WebSocket is not connected.")
 
         text_done = asyncio.Event()
+        sentences_sent = 0
+        sentences_completed = 0
 
         async def _send_text() -> None:
+            nonlocal sentences_sent
             try:
                 async for chunk in text_chunks:
                     chunk = chunk.strip()
@@ -178,7 +181,8 @@ class SarvamTTS:
                     logger.debug("TTS text sent: %.60s", chunk)
 
                     await ws.send(json.dumps({"type": "flush"}))
-                    logger.debug("TTS flush sent")
+                    sentences_sent += 1
+                    logger.debug("TTS flush sent (sentence #%d)", sentences_sent)
 
             except Exception as exc:  # noqa: BLE001
                 logger.error("TTS send error: %s", exc)
@@ -187,18 +191,30 @@ class SarvamTTS:
 
         send_task = asyncio.create_task(_send_text())
 
+        def _turn_complete() -> bool:
+            # Done only once no more sentences will ever be sent AND every
+            # sentence that *was* sent has reported its own completion —
+            # a per-sentence "final"/"completion" event from Sarvam must
+            # NOT end the whole multi-sentence turn early.
+            return text_done.is_set() and sentences_completed >= sentences_sent
+
         try:
             while True:
                 try:
                     message = await asyncio.wait_for(ws.recv(), timeout=15.0)
                 except asyncio.TimeoutError:
+                    if _turn_complete():
+                        break
                     if text_done.is_set():
                         try:
                             message = await asyncio.wait_for(
                                 ws.recv(), timeout=5.0
                             )
                         except asyncio.TimeoutError:
-                            logger.warning("TTS timed out after text done")
+                            logger.warning(
+                                "TTS timed out waiting for remaining sentence audio (%d/%d complete)",
+                                sentences_completed, sentences_sent,
+                            )
                             break
                     else:
                         continue
@@ -228,14 +244,24 @@ class SarvamTTS:
                         event_data = data.get("data", {})
                         event_type = event_data.get("event_type", "")
                         if event_type == "final":
-                            logger.info("TTS synthesis complete (final event)")
-                            break
+                            sentences_completed += 1
+                            logger.info(
+                                "TTS sentence complete (%d/%d, final event)",
+                                sentences_completed, sentences_sent,
+                            )
+                            if _turn_complete():
+                                break
                         else:
                             logger.debug("TTS event: %s", event_type)
 
                     elif msg_type == "completion":
-                        logger.info("TTS synthesis complete (completion)")
-                        break
+                        sentences_completed += 1
+                        logger.info(
+                            "TTS sentence complete (%d/%d, completion)",
+                            sentences_completed, sentences_sent,
+                        )
+                        if _turn_complete():
+                            break
 
                     elif msg_type == "error":
                         err_data = data.get("data", {})

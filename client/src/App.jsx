@@ -4,7 +4,7 @@ import VoiceChat from "./components/VoiceChat";
 import Login from "./components/Login";
 
 function App() {
-  const { isLoading, isAuthenticated, getIdTokenClaims, logout } = useAuth0();
+  const { isLoading, isAuthenticated, getAccessTokenSilently, getIdTokenClaims, logout } = useAuth0();
   const [idToken, setIdToken] = useState(null);
   const [launched, setLaunched] = useState(false);
 
@@ -13,8 +13,14 @@ function App() {
       setIdToken(null);
       return;
     }
-    getIdTokenClaims().then((claims) => setIdToken(claims?.__raw || null));
-  }, [isAuthenticated, getIdTokenClaims]);
+    // getAccessTokenSilently() exercises the refresh-token renewal flow (using
+    // the token persisted in localStorage), so the ID token claims read right
+    // after are guaranteed fresh — not a stale/expired cached value.
+    getAccessTokenSilently()
+      .catch(() => null)
+      .then(() => getIdTokenClaims())
+      .then((claims) => setIdToken(claims?.__raw || null));
+  }, [isAuthenticated, getAccessTokenSilently, getIdTokenClaims]);
 
   if (isLoading) {
     return <div className="app launch-screen" />; // brief auth check, avoid login flash
