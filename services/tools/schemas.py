@@ -64,6 +64,15 @@ TASK_TOOL_DECLARATIONS = [
                         "type": "boolean",
                         "description": "True if external/current info is needed to fill in dates/details.",
                     },
+                    "user_confirmed": {
+                        "type": "boolean",
+                        "description": (
+                            "TRUE only if the user EXPLICITLY asked you to create/track/"
+                            "remind this, or said yes to your offer. FALSE if you are only "
+                            "inferring it would help — when FALSE the task is NOT created and "
+                            "you must ask the user to confirm first. Never default to TRUE."
+                        ),
+                    },
                     "research_summary": {
                         "type": "string",
                         "description": "If you called the research tool first, the key findings to store on this task.",
@@ -74,7 +83,7 @@ TASK_TOOL_DECLARATIONS = [
                         "description": "Official/source URLs from research to store on this task.",
                     },
                 },
-                "required": ["title"],
+                "required": ["title", "user_confirmed"],
             },
         },
     },
@@ -82,14 +91,25 @@ TASK_TOOL_DECLARATIONS = [
         "type": "function",
         "function": {
             "name": "query_tasks",
-            "description": "Look up the user's existing tasks/reminders to answer questions like 'what's on my list today'.",
+            "description": (
+                "Look up the user's existing tasks/reminders to answer ANY question "
+                "about them — what's due, when a specific task is due, what's overdue, "
+                "when a task was created, or its details. Always call this before "
+                "answering a question about tasks; never answer from memory."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "scope": {
                         "type": "string",
-                        "enum": ["today", "this_week", "this_month", "all_active", "by_status", "specific_task"],
-                        "description": "Which slice of tasks to return.",
+                        "enum": ["today", "this_week", "this_month", "all_active", "overdue", "by_status", "specific_task"],
+                        "description": (
+                            "Which slice to return. Use `specific_task` to look up one "
+                            "task by name, `by_status` to filter by status, `overdue` "
+                            "for past-due tasks, or a time horizon. For an explicit date "
+                            "range (e.g. 'next month', 'in December'), use `all_active` "
+                            "together with due_after/due_before."
+                        ),
                     },
                     "status_filter": {
                         "type": "string",
@@ -98,7 +118,15 @@ TASK_TOOL_DECLARATIONS = [
                     },
                     "search_text": {
                         "type": "string",
-                        "description": "Used when scope=specific_task — fuzzy match against task titles.",
+                        "description": "Used when scope=specific_task — fuzzy match against task titles (e.g. 'Cairo train').",
+                    },
+                    "due_after": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 date/time — only return tasks due on or after this. Compute it from today for ranges like 'next month'.",
+                    },
+                    "due_before": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 date/time — only return tasks due on or before this.",
                     },
                 },
                 "required": ["scope"],
@@ -154,6 +182,33 @@ RESEARCH_TOOL = {
 }
 
 
+UPDATE_PROFILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "update_profile",
+        "description": (
+            "Save a STABLE personal detail about the user so future answers are "
+            "personalized without them repeating it. Call this as soon as the user "
+            "tells you where they're based (city/region/country) or their timezone — "
+            "e.g. 'I'm in Delhi'. Don't use it for one-off task details."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "The user's city/region/country, e.g. 'Delhi, India'.",
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone, e.g. 'Asia/Kolkata', if stated or clearly implied by the location.",
+                },
+            },
+        },
+    },
+}
+
+
 def get_tool_declarations() -> list[dict]:
-    """The tool set advertised to the OpenRouter LLM."""
-    return TASK_TOOL_DECLARATIONS + [RESEARCH_TOOL]
+    """The full tool set advertised to the SLM."""
+    return TASK_TOOL_DECLARATIONS + [RESEARCH_TOOL, UPDATE_PROFILE_TOOL]

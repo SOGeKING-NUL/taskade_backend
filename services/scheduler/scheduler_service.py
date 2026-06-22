@@ -32,7 +32,6 @@ from core.config import settings
 from db.session import async_session
 import services.tasks.task_service as task_service
 import services.memory.profile_service as profile_service
-import services.memory.sentiment_service as sentiment_service
 from services.research.refresh_service import refresh_watched_tasks
 
 logger = logging.getLogger("scheduler")
@@ -101,14 +100,6 @@ async def daily_task_refresh() -> None:
         await _refresh_one_user(user_id)
 
 
-async def sentiment_rollup() -> None:
-    """Periodic batch: fold recent mood signals into each user's profile."""
-    for user_id in await _all_user_ids():
-        async with async_session() as session:
-            await sentiment_service.rollup_sentiment(session, user_id)
-            await session.commit()
-
-
 def start_scheduler() -> AsyncIOScheduler:
     """Create + start the recurring sweep. Call once from the app lifespan."""
     global _scheduler
@@ -140,23 +131,10 @@ def start_scheduler() -> AsyncIOScheduler:
         max_instances=1,
     )
 
-    # Periodic sentiment rollup (batch — never per message).
-    _scheduler.add_job(
-        sentiment_rollup,
-        trigger="interval",
-        seconds=settings.SENTIMENT_ROLLUP_SECONDS,
-        id="sentiment_rollup",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-
     _scheduler.start()
     logger.info(
-        "Scheduler started — due-sweep %ds, daily refresh @local-hour, "
-        "sentiment rollup %ds",
+        "Scheduler started — due-sweep %ds, daily refresh @local-hour",
         settings.REMINDER_SWEEP_SECONDS,
-        settings.SENTIMENT_ROLLUP_SECONDS,
     )
     return _scheduler
 

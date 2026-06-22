@@ -6,6 +6,7 @@ session and calls into here, so this logic stays independently testable.
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -40,9 +41,29 @@ async def ensure_user(
     return user
 
 
+_MATCH_STOPWORDS = {
+    "a", "an", "the", "to", "for", "of", "my", "me", "i", "on", "in", "at",
+    "set", "up", "reminder", "task", "remind", "about", "and", "is", "was",
+}
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower())}
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    """Coerce a datetime to timezone-aware UTC so comparisons never crash on a
+    naive value (Postgres returns tz-aware, but a tool-supplied ISO date may be
+    naive)."""
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 async def find_task(session: AsyncSession, user_id: str, needle: str | None) -> Task | None:
-    """Resolve a task by exact id first, then case-insensitive title match
-    (preferring tasks that aren't already done/cancelled)."""
+    """Resolve a task by exact id first, then title match. Tries substring,
+    then word-overlap (so 'book a train to Cairo' still finds 'Cairo train
+    tickets'), preferring tasks that aren't already done/cancelled."""
     needle = (needle or "").strip()
     if not needle:
         return None
@@ -52,8 +73,27 @@ async def find_task(session: AsyncSession, user_id: str, needle: str | None) -> 
         return exact
 
     rows = (await session.execute(select(Task).where(Task.user_id == user_id))).scalars().all()
+    if not rows:
+        return None
+
+    # 1) substring match (precise)
     nl = needle.lower()
     matches = [t for t in rows if nl in t.title.lower()]
+
+    # 2) fall back to word-overlap ranking
+    if not matches:
+        query_words = _words(nl) - _MATCH_STOPWORDS
+        query_words = {w for w in query_words if len(w) > 1}
+        if query_words:
+            scored = [
+                (len(query_words & _words(t.title)), t) for t in rows
+            ]
+            scored = [(n, t) for n, t in scored if n > 0]
+            # Most-overlapping first; the stable sort below keeps that order
+            # within the open/closed grouping.
+            scored.sort(key=lambda x: -x[0])
+            matches = [t for _, t in scored]
+
     if not matches:
         return None
     matches.sort(key=lambda t: t.status in _CLOSED)  # open tasks first
@@ -111,6 +151,8 @@ async def get_tasks(
     scope: str = "all_active",
     status_filter: str | None = None,
     search_text: str | None = None,
+    due_after: datetime | None = None,
+    due_before: datetime | None = None,
 ) -> list[Task]:
     rows = (
         await session.execute(
@@ -127,14 +169,36 @@ async def get_tasks(
         return [found] if found else []
 
     active = [t for t in rows if t.status not in _CLOSED]
+    now = datetime.now(timezone.utc)
+
+    # Explicit date-range query (e.g. "next month", "in December"). Only dated
+    # tasks qualify — a date-range question is about scheduled tasks.
+    if due_after is not None or due_before is not None:
+        lo, hi = _aware(due_after), _aware(due_before)
+
+        def in_range(t: Task) -> bool:
+            d = _aware(t.due_at)
+            if d is None:
+                return False
+            if lo is not None and d < lo:
+                return False
+            if hi is not None and d > hi:
+                return False
+            return True
+
+        return [t for t in active if in_range(t)]
+
+    if scope == "overdue":
+        return [t for t in active if (d := _aware(t.due_at)) is not None and d < now]
+
     if scope in ("today", "this_week", "this_month"):
         horizon_days = {"today": 1, "this_week": 7, "this_month": 31}[scope]
-        now = datetime.now(timezone.utc)
 
         def due_within(t: Task) -> bool:
-            if t.due_at is None:
+            d = _aware(t.due_at)
+            if d is None:
                 return True  # undated active tasks always show
-            return (t.due_at - now).total_seconds() <= horizon_days * 86400
+            return (d - now).total_seconds() <= horizon_days * 86400
 
         return [t for t in active if due_within(t)]
 

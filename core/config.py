@@ -80,10 +80,6 @@ class Settings:
     MEMORY_RECALL_LIMIT: int = int(os.getenv("MEMORY_RECALL_LIMIT", "10"))
     # Default local hour for the daily research refresh when a profile sets none.
     DAILY_CHECKIN_HOUR: int = int(os.getenv("DAILY_CHECKIN_HOUR", "6"))
-    # How often the batch sentiment rollup runs (default hourly).
-    SENTIMENT_ROLLUP_SECONDS: int = int(os.getenv("SENTIMENT_ROLLUP_SECONDS", "3600"))
-    # Lookback window for aggregating mood signals.
-    SENTIMENT_WINDOW_DAYS: int = int(os.getenv("SENTIMENT_WINDOW_DAYS", "7"))
 
     # ── Server ───────────────────────────────────────────────────
     HOST: str = os.getenv("HOST", "0.0.0.0")

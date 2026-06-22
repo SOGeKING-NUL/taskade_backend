@@ -8,6 +8,7 @@ import logging
 
 from .task_tools import create_task, query_tasks, update_task_status
 from .research_tools import research
+from .profile_tools import update_profile
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ TOOL_REGISTRY = {
     "query_tasks": query_tasks,
     "update_task_status": update_task_status,
     "research": research,
+    "update_profile": update_profile,
 }
 
 

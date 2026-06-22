@@ -108,6 +108,67 @@ export default function VoiceChat({ accessToken }) {
     fetchTasks();
   }, [fetchTasks]);
 
+  // ── One-time location capture ──────────────────────────────────────
+  // If we don't already have the user's location stored, ask the browser for
+  // it ONCE, resolve it to "City, Country", persist it, and push it live to
+  // this session. Once stored, /profile returns it and we never prompt again.
+  useEffect(() => {
+    if (!accessToken) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/profile`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const data = await res.json();
+        if (cancelled || data?.profile?.location) return; // already known — don't ask
+        if (!navigator.geolocation) return;
+
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            try {
+              const { latitude, longitude } = pos.coords;
+              // Keyless reverse-geocode (lat/lng → city/country).
+              const geoRes = await fetch(
+                `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`
+              );
+              const g = await geoRes.json();
+              const city = g.city || g.locality || g.principalSubdivision;
+              const location = [city, g.countryName].filter(Boolean).join(", ");
+              if (!location) return;
+
+              // Persist durably…
+              await fetch(`${API_BASE}/profile/location`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify({ location }),
+              });
+              // …and make it live in the current voice session.
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: "location", location }));
+              }
+              console.log("Location captured:", location);
+            } catch (err) {
+              console.warn("Failed to resolve/save location:", err);
+            }
+          },
+          (err) => console.warn("Geolocation unavailable/denied:", err.message),
+          { timeout: 10000, maximumAge: 86400000 }
+        );
+      } catch (err) {
+        console.warn("Profile check failed:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken]);
+
   // ── WebSocket message handler ──────────────────────────────────────
   const handleMessage = useCallback((data) => {
     switch (data.type) {

@@ -16,7 +16,14 @@ from models import Base  # noqa: F401  (registers tables on Base.metadata)
 
 logger = logging.getLogger(__name__)
 
-engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    pool_pre_ping=True,      # drop dead connections (e.g. pooler recycled them)
+    pool_size=10,
+    max_overflow=10,         # up to 20 concurrent; mind Supabase pooler's own ceiling
+    pool_timeout=10,         # fail loudly after 10s instead of hanging forever
+    pool_recycle=1800,       # recycle connections every 30 min
+)
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -32,5 +39,8 @@ async def init_db() -> None:
         )
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR")
+        )
+        await conn.execute(
+            text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS location VARCHAR")
         )
     logger.info("Database ready — tables ensured")

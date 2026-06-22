@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 _client = AsyncOpenAI(
     api_key=settings.OPENROUTER_API_KEY,
     base_url=settings.OPENROUTER_BASE_URL,
+    timeout=30.0,
+    max_retries=2,
 )
 
 _EXTRACT_SYSTEM_PROMPT = (

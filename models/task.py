@@ -78,8 +78,10 @@ class Task(Base):
         return {
             "id": self.id,
             "title": self.title,
+            "description": self.description,
             "status": self.status,
             "task_type": self.task_type,
             "due_at": self.due_at.isoformat() if self.due_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
             "parent_id": self.parent_id,
         }

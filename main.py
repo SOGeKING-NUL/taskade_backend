@@ -13,22 +13,23 @@ Architecture:
 import asyncio
 import json
 import logging
+import random
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from core.config import settings
 from db.session import async_session, init_db
 import services.tasks.task_service as task_service
 import services.memory.profile_service as profile_service
 import services.memory.memory_service as memory_service
-import services.memory.sentiment_service as sentiment_service
+import services.engagement.engagement_service as engagement_service
 from services.auth.auth_service import authenticate_websocket, get_current_user_id, profile_fields
 from services.scheduler.scheduler_service import start_scheduler, shutdown_scheduler
 from services.voice.stt_deepgram import DeepgramStreamingSTT
 from services.voice.tts import SarvamTTS
-from services.ai.llm import OpenRouterLLM
 from services.ai.slm import GroqSLM
 
 # ── Logging ──────────────────────────────────────────────────────────────
@@ -60,11 +61,30 @@ app.add_middleware(
 )
 
 # ── Global services (stateless, shared across connections) ───────────────
-slm_service = GroqSLM()       # fast conversational path (Groq)
-llm_service = OpenRouterLLM()  # tool-calling / research path (OpenRouter)
+# Single brain: the Groq SLM answers, reasons, and calls the tools itself
+# (create_task / query_tasks / update_task_status / research). `research` is the
+# only tool that reaches out to OpenRouter (web search) under the hood.
+slm_service = GroqSLM()
 
 # ── Sentence-boundary characters ────────────────────────────────────────
 _SENTENCE_ENDERS = frozenset(".!?।;:")
+
+# Keep the in-memory chat prompt bounded on long sessions (messages, not turns).
+_MAX_HISTORY_MESSAGES = 20
+# Run the background memory-extraction pass once every N turns rather than every
+# turn — firing an extra LLM call per turn inflated our per-minute API volume and
+# tripped free-tier rate limits under rapid back-and-forth.
+_LEARN_EVERY_TURNS = 3
+
+# Short spoken acknowledgements played the moment a (slow) web `research` tool
+# starts, so the user hears something while the lookup runs in the background
+# instead of dead air. Kept to one per turn.
+_RESEARCH_FILLERS = [
+    "Let me look that up for you.",
+    "Give me a moment to check on that.",
+    "Sure, let me research that real quick.",
+    "One moment while I look into that.",
+]
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -81,9 +101,9 @@ async def _send_json(ws: WebSocket, data: dict) -> None:
 async def _memory_context(session_context: dict) -> str:
     """
     Build a short system block of what we know about the user (Milestone 5),
-    injected only when we escalate to the tool-calling LLM — so `research` /
-    `create_task` run with the user's known prefs/facts in view. Profile fields
-    come free from session context; recalled facts are a fast DB read.
+    injected into the SLM's prompt each turn — so `research` / `create_task` run
+    with the user's known prefs/facts in view. Profile fields come free from
+    session context; recalled facts are a fast DB read.
     """
     user_id = session_context["user_id"]
     profile = session_context.get("profile") or {}
@@ -91,10 +111,10 @@ async def _memory_context(session_context: dict) -> str:
     lines: list[str] = []
     if profile.get("display_name"):
         lines.append(f"User's name: {profile['display_name']}.")
+    if profile.get("location"):
+        lines.append(f"Location: {profile['location']}.")
     if profile.get("timezone"):
         lines.append(f"Timezone: {profile['timezone']}.")
-    if profile.get("sentiment_summary"):
-        lines.append(f"Recent mood: {profile['sentiment_summary']}")
     prefs = profile.get("preferences") or {}
     if prefs:
         lines.append(f"Preferences: {prefs}.")
@@ -113,6 +133,21 @@ async def _memory_context(session_context: dict) -> str:
     return "What you know about the user (use it to personalize, don't recite it):\n" + "\n".join(lines)
 
 
+async def _learn_from_turns(user_id: str, exchanges: list[tuple[str, str]]) -> None:
+    """
+    Background batch learn — runs every few turns instead of every turn.
+
+    Folds several exchanges into ONE memory-extraction call, so learning costs
+    one LLM call per N turns instead of one per turn. Fire-and-forget; the
+    memory service swallows its own exceptions.
+    """
+    if not exchanges:
+        return
+    user_text = "\n".join(u for u, _ in exchanges if u)
+    assistant_text = "\n".join(a for _, a in exchanges if a)
+    await memory_service.remember(user_id, user_text, assistant_text)
+
+
 # ═════════════════════════════════════════════════════════════════════════
 #  Voice pipeline (LLM → TTS only — STT is handled by Deepgram callbacks)
 # ═════════════════════════════════════════════════════════════════════════
@@ -124,12 +159,13 @@ async def run_voice_pipeline(
     session_context: dict,
 ) -> None:
     """
-    SLM (fast) → optional LLM tool-calling → TTS cascade for one user turn.
+    SLM (reason + tool-call) → TTS cascade for one user turn.
 
-    Receives a pre-computed transcript (from Deepgram utterance_end). The fast
-    SLM answers directly when possible; if it escalates, the OpenRouter LLM runs
-    the tool-calling loop. Either way, produced text streams sentence-by-sentence
-    into the TTS path. Conversation history is stored in OpenAI message format.
+    Receives a pre-computed transcript (from Deepgram utterance_end). The Groq
+    SLM holds the conversation, answers directly, and calls tools itself
+    (create_task / query_tasks / update_task_status / research) as needed; its
+    final spoken answer streams sentence-by-sentence into the TTS path.
+    Conversation history is stored in OpenAI message format.
     """
 
     await _send_json(ws, {"type": "processing", "stage": "slm"})
@@ -143,7 +179,7 @@ async def run_voice_pipeline(
         full_response_parts.append(token)
         return token
 
-    # ── Task A: route through SLM, escalate to LLM if needed → sentences ──
+    # ── Task A: SLM reasons + calls tools → spoken sentences ─────────────
     async def _produce_text() -> None:
         sentence_buf = ""
 
@@ -155,49 +191,43 @@ async def run_voice_pipeline(
             return buf
 
         try:
-            # 1) Fast SLM path
-            escalation = None
-            async for ev in slm_service.stream_response(transcript, conversation_history):
+            # Single brain: the SLM holds the whole conversation and calls the
+            # tools itself. Build its message list (system prompt + what we know
+            # about the user + prior history + this turn), then run the tool loop.
+            # `run_conversation` only yields SPOKEN text from a round that makes no
+            # tool calls, so a pre-research/"thinking" answer is never voiced.
+            messages = [{"role": "system", "content": slm_service.system_prompt}]
+            memory_msg = await _memory_context(session_context)
+            if memory_msg:
+                messages.append({"role": "system", "content": memory_msg})
+            messages += list(conversation_history)
+            messages.append({"role": "user", "content": transcript})
+
+            spoke_filler = False
+            async for ev in slm_service.run_conversation(messages, session_context):
                 if ev["type"] == "text":
                     await _emit(ev["text"])
                     sentence_buf += ev["text"]
                     sentence_buf = await _push_sentences(sentence_buf)
-                elif ev["type"] == "escalate":
-                    escalation = ev
-                    break
-
-            # 2) Escalate to the tool-calling LLM.
-            # NOTE: no spoken filler here — sending a filler sentence then waiting
-            # several seconds for the LLM makes Sarvam treat it as a complete
-            # utterance (send_completion_event), ending TTS before the real
-            # answer. The UI's "thinking" indicator covers the gap instead.
-            if escalation is not None:
-                await _send_json(ws, {"type": "escalated", "intent": escalation.get("intent_summary", "")})
-
-                messages = [{"role": "system", "content": llm_service.system_prompt}]
-                memory_msg = await _memory_context(session_context)
-                if memory_msg:
-                    messages.append({"role": "system", "content": memory_msg})
-                messages += list(conversation_history)
-                messages.append({
-                    "role": "user",
-                    "content": f"{transcript}\n\n[intent: {escalation.get('intent_summary', '')}]",
-                })
-
-                async for ev in llm_service.run_conversation(messages, session_context):
-                    if ev["type"] == "text":
-                        await _emit(ev["text"])
-                        sentence_buf += ev["text"]
-                        sentence_buf = await _push_sentences(sentence_buf)
-                    elif ev["type"] == "tool.start":
-                        await _send_json(ws, {"type": "tool.start", "name": ev["name"]})
-                    elif ev["type"] == "tool.result":
-                        await _send_json(ws, {
-                            "type": "tool.result",
-                            "name": ev["name"],
-                            "ok": ev["ok"],
-                            "summary": ev.get("summary", ""),
-                        })
+                elif ev["type"] == "tool.start":
+                    await _send_json(ws, {"type": "tool.start", "name": ev["name"]})
+                    # Speak a short filler while a slow web lookup runs, so the user
+                    # isn't left in silence. Pushed straight to TTS (not via _emit)
+                    # so it's spoken but NOT recorded as part of the answer text or
+                    # history. Once per turn, research-only.
+                    if ev["name"] == "research" and not spoke_filler:
+                        spoke_filler = True
+                        if sentence_buf.strip():
+                            await sentence_queue.put(sentence_buf)
+                            sentence_buf = ""
+                        await sentence_queue.put(random.choice(_RESEARCH_FILLERS))
+                elif ev["type"] == "tool.result":
+                    await _send_json(ws, {
+                        "type": "tool.result",
+                        "name": ev["name"],
+                        "ok": ev["ok"],
+                        "summary": ev.get("summary", ""),
+                    })
 
             # Flush leftover text
             if sentence_buf.strip():
@@ -218,13 +248,22 @@ async def run_voice_pipeline(
             if full_text:
                 conversation_history.append({"role": "user", "content": transcript})
                 conversation_history.append({"role": "assistant", "content": full_text})
+                # Bound the prompt so a long session can't grow it unboundedly.
+                if len(conversation_history) > _MAX_HISTORY_MESSAGES:
+                    del conversation_history[:-_MAX_HISTORY_MESSAGES]
 
-                # Milestone 5 — learn from the turn WITHOUT blocking it. Both are
-                # fire-and-forget: a slow extraction call must never delay the
-                # next user turn. Exceptions inside are swallowed by the services.
+                # Milestone 5 — learn from the turn WITHOUT blocking it AND without
+                # firing 2 extra LLM calls every turn. Buffer the exchange and run a
+                # single batched learn pass every _LEARN_EVERY_TURNS turns. Still
+                # fire-and-forget: a slow extraction must never delay the next turn.
                 user_id = session_context["user_id"]
-                asyncio.create_task(memory_service.remember(user_id, transcript, full_text))
-                asyncio.create_task(sentiment_service.note_sentiment(user_id, transcript))
+                learn_buf = session_context.setdefault("_learn_buf", [])
+                learn_buf.append((transcript, full_text))
+                session_context["turn_count"] = session_context.get("turn_count", 0) + 1
+                if session_context["turn_count"] % _LEARN_EVERY_TURNS == 0:
+                    batch = list(learn_buf)
+                    learn_buf.clear()
+                    asyncio.create_task(_learn_from_turns(user_id, batch))
 
     # ── Task B: read sentences → TTS → stream audio to client ───────────
     async def _tts_to_client() -> None:
@@ -313,6 +352,11 @@ async def voice_websocket(ws: WebSocket) -> None:
         """Forward finalized transcript segment to client."""
         await _send_json(ws, {"type": "stt.final", "text": text})
 
+    async def on_stt_reconnect() -> None:
+        """STT socket dropped and is being re-established — tell the client."""
+        logger.warning("STT reconnecting — notifying client")
+        await _send_json(ws, {"type": "stt.reconnecting"})
+
     async def on_utterance_end(transcript: str) -> None:
         """Deepgram detected end-of-turn — trigger the LLM → TTS pipeline."""
         nonlocal pipeline_task
@@ -359,6 +403,7 @@ async def voice_websocket(ws: WebSocket) -> None:
             on_interim=on_interim_transcript,
             on_final=on_final_transcript,
             on_utterance_end=on_utterance_end,
+            on_reconnect=on_stt_reconnect,
         )
         logger.info("STT & TTS WebSockets ready — waiting for speech")
 
@@ -399,6 +444,7 @@ async def voice_websocket(ws: WebSocket) -> None:
                         on_interim=on_interim_transcript,
                         on_final=on_final_transcript,
                         on_utterance_end=on_utterance_end,
+                        on_reconnect=on_stt_reconnect,
                     )
                     await _send_json(ws, {"type": "interrupted"})
 
@@ -406,6 +452,17 @@ async def voice_websocket(ws: WebSocket) -> None:
                     conversation_history.clear()
                     await _send_json(ws, {"type": "history_cleared"})
                     logger.info("Conversation history cleared")
+
+                elif msg_type == "location":
+                    # Browser-resolved location (see POST /profile/location for the
+                    # durable save). This just makes it live in THIS session's
+                    # context so the very turn after granting is already location-aware.
+                    loc = (data.get("location") or "").strip()
+                    if loc:
+                        prof = dict(session_context.get("profile") or {})
+                        prof["location"] = loc
+                        session_context["profile"] = prof
+                        logger.info("Session location set live: %s", loc)
 
                 elif msg_type == "ping":
                     await _send_json(ws, {"type": "pong"})
@@ -442,6 +499,56 @@ async def voice_websocket(ws: WebSocket) -> None:
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "service": "tts-speech-engine"}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  Profile REST (location capture — frontend resolves it once, we persist it)
+# ═════════════════════════════════════════════════════════════════════════
+class LocationIn(BaseModel):
+    location: str
+    timezone: str | None = None
+
+
+@app.get("/profile")
+async def get_profile(user_id: str = Depends(get_current_user_id)):
+    """Return the user's profile context — the frontend checks `location` to
+    decide whether it still needs to ask the browser for it (so we never
+    re-prompt once it's stored)."""
+    async with async_session() as session:
+        profile = await profile_service.ensure_profile(session, user_id)
+        ctx = profile.to_context()
+        await session.commit()
+    return {"profile": ctx}
+
+
+@app.post("/profile/location")
+async def set_profile_location(
+    body: LocationIn, user_id: str = Depends(get_current_user_id)
+):
+    """Durably store a browser-resolved location so we don't ask again."""
+    location = body.location.strip()
+    if not location:
+        return {"ok": False, "error": "empty_location"}
+    async with async_session() as session:
+        profile = await profile_service.set_profile_details(
+            session, user_id, location=location, timezone=(body.timezone or None)
+        )
+        ctx = profile.to_context()
+        await session.commit()
+    logger.info("Stored location for %s: %s", user_id, location)
+    return {"ok": True, "profile": ctx}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  Engagement (on-demand greeting — app-open / notifications; NOT the hot path)
+# ═════════════════════════════════════════════════════════════════════════
+@app.get("/engagement/greeting")
+async def engagement_greeting(user_id: str = Depends(get_current_user_id)):
+    """A short, personalized hype/greeting built on demand from the user's recent
+    memories + upcoming tasks. Called at app-open or by the (future) notification
+    layer — never on the conversation path."""
+    greeting = await engagement_service.generate_greeting(user_id)
+    return {"greeting": greeting}
 
 
 # ═════════════════════════════════════════════════════════════════════════

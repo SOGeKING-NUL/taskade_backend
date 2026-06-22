@@ -7,7 +7,7 @@ tool-calling layer already expects (with a `summary` for the LLM to speak).
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from db.session import async_session
 from models.task import Task
@@ -20,10 +20,15 @@ def _parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         logger.warning("Could not parse datetime: %r", value)
         return None
+    # A model may emit a date with no timezone ("2026-12-06") — treat as UTC so
+    # it stores and compares consistently against tz-aware DB values.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _user(session_context: dict) -> str:
@@ -32,6 +37,16 @@ def _user(session_context: dict) -> str:
 
 async def create_task(args: dict, session_context: dict) -> dict:
     user_id = _user(session_context)
+
+    # Structural confirmation gate: never create a task the user didn't explicitly
+    # ask for. The model must assert `user_confirmed=true`; if it's only inferring
+    # the task would help, nothing is written and it's told to ask the user first.
+    if not args.get("user_confirmed", False):
+        return {
+            "ok": False,
+            "needs_confirmation": True,
+            "summary": "Not created — ask the user to confirm they want this task first.",
+        }
 
     # Stash research findings (from a prior `research` tool call this turn) onto
     # the task's freeform context JSONB, so the task carries its sources.
@@ -72,6 +87,8 @@ async def query_tasks(args: dict, session_context: dict) -> dict:
             scope=args.get("scope", "all_active"),
             status_filter=args.get("status_filter"),
             search_text=args.get("search_text"),
+            due_after=_parse_dt(args.get("due_after")),
+            due_before=_parse_dt(args.get("due_before")),
         )
         brief = []
         for t in tasks:

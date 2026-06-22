@@ -80,6 +80,8 @@ class OpenRouterLLM:
         self.client = AsyncOpenAI(
             api_key=settings.OPENROUTER_API_KEY,
             base_url=settings.OPENROUTER_BASE_URL,
+            timeout=60.0,      # tool loop can be longer, but still bounded
+            max_retries=2,     # SDK backs off (honoring Retry-After) on 429/5xx
         )
         self.model = settings.OPENROUTER_LLM_MODEL
         logger.info("OpenRouter LLM initialised  model=%s", self.model)

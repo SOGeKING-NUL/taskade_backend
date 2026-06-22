@@ -1,70 +1,96 @@
-# Voice AI — Low-Latency Real-Time TTS & STT Speech Engine
+# Voice-First Personal Assistant
 
-This project is a high-performance, real-time voice conversational agent. It enables full-duplex voice interactions with sub-second latency by chaining **Speech-to-Text (STT)**, a **Large Language Model (LLM)**, and **Text-to-Speech (TTS)** in a concurrent streaming pipeline.
+A real-time, full-duplex **voice** assistant that goes beyond chat: it understands
+intent, calls tools, manages a durable task tree, runs live web research, delivers
+reminders, and remembers the user across sessions — all governed by one streaming
+voice loop over a single authenticated WebSocket.
 
----
-
-## Core Architecture & Execution Flow
-
-```
-   [ User Microphone ] 
-           │ (Float32 Audio Capture)
-           ▼
-   [ AudioRecorder ]
-           │ (Downsamples & converts to Mono Int16 PCM)
-           ▼  WebSocket (Binary / JSON Control)
-    ┌───────────────────────────┐
-    │   FastAPI Backend         │
-    │                           │
-    │   1. [ Sarvam STT ] ◄────┼── REST Request (Transcribes full audio)
-    │      Returns text transcript
-    │                           │
-    │   2. [ Gemini Flash LLM ] ├── Streaming Token Generator
-    │      Yields tokens incrementally
-    │                           │
-    │   3. [ Sentence Chunker ] ├── Splits streams at sentence boundaries (. ! ? ; :)
-    │      Yields clean text sentences
-    │                           │
-    │   4. [ Sarvam TTS WS ] ──┼── WebSocket Stream (Sends sentences / flushes)
-    │      Receives base64 WAV chunks
-    │                           │
-    │   5. [ Header Stripper ] ┼── Decodes base64, strips 44-byte WAV header
-    │      Yields raw Mono Int16 PCM
-    └──────────┬────────────────┘
-               │  WebSocket (Binary Audio Chunks)
-               ▼
-      [ AudioPlayer ]
-               │ (Converts Int16 to Float32, queues in Jitter Buffer)
-               ▼
-     [ Web Audio API ] (Sample-accurate AudioBufferSourceNode scheduling)
-```
+- **Backend deep-dive:** [`system_explanation.md`](system_explanation.md)
+- **Frontend deep-dive:** [`frontend_explanation.md`](frontend_explanation.md)
+- **Milestone status:** [`CHECKLIST.md`](CHECKLIST.md)
 
 ---
 
-## Key Latency Optimization Mechanisms
+## What it does
 
-### 1. Direct PCM Pipeline (Zero-Decode Overhead)
-Compressing audio to MP3 or Opus introduces framing delays and CPU decompression overhead. This system uses raw **Mono Int16 PCM (LPCM)** at the boundary.
-- **Microphone Input**: Downsampled to a clean sample rate and sent to the server.
-- **TTS Output**: The backend requests the `wav` codec from Sarvam's TTS API, decodes the base64 output, and strips the 44-byte WAV header. The raw PCM16 samples are sent to the client, which plays them immediately.
+- 🎙️ **Always-on voice** — speak naturally; no push-to-talk. Instant barge-in.
+- ⚡ **Two-tier brain** — a fast SLM answers chat/factual turns directly; it
+  escalates to a tool-calling LLM only when the turn needs an action.
+- ✅ **Task tree** — single-step reminders and multi-step goals with hierarchy
+  (`parent`) and sequencing (`depends_on`); finishing a prerequisite auto-unblocks
+  the next step.
+- 🔎 **Live research** — the model web-searches itself to fill in dates/details
+  before creating a task.
+- ⏰ **Reminders** — a scheduler detects what's due; a REST endpoint delivers it.
+- 🧠 **Memory** — a structured profile plus free-form recalled facts and sentiment,
+  learned in the background without slowing the conversation.
+- 🔐 **Auth0 Google sign-in** with persistent sessions.
 
-### 2. Sentence-Boundary Chunking
-Instead of waiting for the LLM to generate a full response, the backend splits the streaming token stream into sentences using a set of punctuation boundaries (`.!?।;:`).
-- Once a sentence reaches a threshold length (>5 characters) and ends with punctuation, it is instantly pushed to the TTS processing queue.
-- This overlapping pipeline executes **LLM generation and TTS synthesis concurrently**.
+---
 
-### 3. Client-Side Jitter Pre-Buffering
-To handle network latency fluctuations without audible cuts:
-- The client-side `AudioPlayer` queues incoming audio chunks.
-- Playback is held until **2 chunks** are fully loaded. This absorbs initial network jitter and ensures a continuous audio stream.
+## Provider Stack
 
-### 4. Sample-Accurate Look-Ahead Scheduling
-Browsers cannot play separate audio nodes back-to-back without gap pops if scheduled on simple event handlers.
-- The player schedules each `AudioBufferSourceNode` precisely on the `AudioContext` timeline using `nextStartTime`.
-- A **50ms look-ahead buffer** prevents the audio clock from falling behind the system clock, achieving seamless, gapless playback.
+| Role | Provider / Model |
+|---|---|
+| Speech-to-Text | Deepgram **Nova-3** (server-side endpointing) |
+| Fast path (SLM) | Groq **`llama-3.1-8b-instant`** |
+| Tool/research (LLM) | OpenRouter **`openai/gpt-4o-mini`** + web search |
+| Text-to-Speech | Sarvam **Bulbul** (streaming WAV) |
+| Auth | **Auth0** (Google social login, PKCE) |
+| Database | **Postgres** (Supabase, IPv4 session pooler) |
 
-### 5. Instant Barge-in (Interrupt Handling)
-True conversation requires the ability to interrupt the AI.
-- When the user starts speaking or clicks the mic, the client sends an `interrupt` control frame.
-- The server instantly cancels the active pipeline task (STT/LLM/TTS operations) and sends a confirmation frame.
-- The client-side player immediately stops all active audio nodes, resetting the system to a clean listening state.
+Groq and OpenRouter are both OpenAI-compatible, so a single `openai` SDK serves
+both. The latency-critical "just answer" path stays on Groq direct; the routing
+hop only lands on the already-slow tool path.
+
+---
+
+## Real-time pipeline
+
+```
+[ Mic ] → PCM-16 frames → WebSocket → Deepgram STT (endpointing)
+   → Groq SLM (fast)  ──answers──────────────────────────────┐
+        └─escalate─→ OpenRouter LLM ⇄ Tools ⇄ Postgres        │
+                          (create_task / query / research)    │
+   → sentence chunker → Sarvam TTS → PCM-16 → [ Speaker ]  ◄──┘
+```
+
+The text producer and the TTS consumer run concurrently (`asyncio.gather` + a
+sentence queue), so the user hears sentence 1 while sentence 2 is still being
+generated. Sentence boundaries (`.!?।;:`) drive the handoff.
+
+---
+
+## Running it
+
+### Backend
+```bash
+# from the project root, using the project venv
+./venv/Scripts/python.exe -m pip install -r requirements.txt
+./venv/Scripts/python.exe main.py        # serves on :8000
+```
+Requires a `.env` (see `.env.example`) with the Deepgram / Groq / OpenRouter /
+Sarvam / Auth0 keys and a `DATABASE_URL` pointing at the Supabase **session
+pooler** (the direct `db.<ref>.supabase.co` host is IPv6-only and will time out on
+most networks).
+
+### Frontend
+```bash
+cd client
+npm install
+npm run dev                               # serves on :5173
+```
+Requires `client/.env` with `VITE_WS_URL`, `VITE_API_URL`, `VITE_AUTH0_DOMAIN`,
+`VITE_AUTH0_CLIENT_ID`. The dev origin must be allow-listed in the Auth0 dashboard
+(Callback / Logout / Web Origins).
+
+---
+
+## API surface
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| WS | `/ws/voice?token=<jwt>` | Auth0 ID token | The voice session |
+| GET | `/health` | — | Liveness |
+| GET | `/tasks` | `Bearer <jwt>` | List the user's tasks |
+| GET | `/reminders/due` | `Bearer <jwt>` | Deliver + mark due reminders |

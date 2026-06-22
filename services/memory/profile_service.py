@@ -33,21 +33,32 @@ async def ensure_profile(
     return profile
 
 
+async def set_profile_details(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    location: str | None = None,
+    timezone: str | None = None,
+    display_name: str | None = None,
+) -> UserProfile:
+    """Persist stable personal details the user shares (location, tz, name)."""
+    profile = await ensure_profile(session, user_id)
+    if location is not None:
+        profile.location = location
+    if timezone is not None:
+        profile.timezone = timezone
+    if display_name is not None:
+        profile.display_name = display_name
+    await session.flush()
+    logger.info("Updated profile details for %s", user_id)
+    return profile
+
+
 def checkin_hour(profile: UserProfile) -> int:
     """The user's daily refresh hour, falling back to the global default."""
     if profile.daily_checkin_hour is not None:
         return profile.daily_checkin_hour
     return settings.DAILY_CHECKIN_HOUR
-
-
-async def set_sentiment(
-    session: AsyncSession, user_id: str, score: float, summary: str
-) -> None:
-    """Persist a rolled-up sentiment snapshot (called by the batch rollup)."""
-    profile = await ensure_profile(session, user_id)
-    profile.sentiment_score = score
-    profile.sentiment_summary = summary
-    await session.flush()
 
 
 async def mark_refreshed(session: AsyncSession, user_id: str, on: date) -> None:
