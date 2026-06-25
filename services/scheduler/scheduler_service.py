@@ -33,6 +33,7 @@ from db.session import async_session
 import services.tasks.task_service as task_service
 import services.memory.profile_service as profile_service
 from services.research.refresh_service import refresh_watched_tasks
+import services.memory.reflection_service as reflection_service
 
 logger = logging.getLogger("scheduler")
 
@@ -100,6 +101,32 @@ async def daily_task_refresh() -> None:
         await _refresh_one_user(user_id)
 
 
+async def daily_reflection_sweep() -> None:
+    """Run reflection sweeps for all users.
+
+    Daily sweep runs every day, weekly on Mondays, monthly on the 1st.
+    The sweep type is determined by the current day.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    for user_id in await _all_user_ids():
+        try:
+            # Daily sweep always runs.
+            await reflection_service.run_sweep(user_id, "daily")
+
+            # Weekly sweep on Mondays.
+            if now.weekday() == 0:
+                await reflection_service.run_sweep(user_id, "weekly")
+
+            # Monthly sweep on the 1st.
+            if now.day == 1:
+                await reflection_service.run_sweep(user_id, "monthly")
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Reflection sweep failed for %s: %s", user_id, exc)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """Create + start the recurring sweep. Call once from the app lifespan."""
     global _scheduler
@@ -131,9 +158,22 @@ def start_scheduler() -> AsyncIOScheduler:
         max_instances=1,
     )
 
+    # Daily reflection sweep — generates state-delta insights from the
+    # knowledge graph.  Runs once daily at 07:00 UTC.
+    _scheduler.add_job(
+        daily_reflection_sweep,
+        trigger="cron",
+        hour=7,
+        minute=0,
+        id="daily_reflection_sweep",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
     _scheduler.start()
     logger.info(
-        "Scheduler started — due-sweep %ds, daily refresh @local-hour",
+        "Scheduler started — due-sweep %ds, daily refresh @local-hour, reflections @07:00 UTC",
         settings.REMINDER_SWEEP_SECONDS,
     )
     return _scheduler

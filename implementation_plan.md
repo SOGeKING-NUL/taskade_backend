@@ -1,64 +1,106 @@
-# Backend Architecture & Feature Plan: Voice-First Assistant
+# Architecture Upgrade: Continuity-Aware Temporal Knowledge Graph
 
-This document outlines the detailed backend architecture, addressing how the multi-stage task lifecycle operates entirely on the server, the strategy for the memory layer (Graph vs. Vector), and a breakdown of the specific features we will build.
+This document details the architectural pivot from a "flat fact" memory system to a **Temporal Knowledge Graph**, alongside necessary safeguards for the autonomous task and research engines.
+
+## Why We Are Making These Changes (The Problem)
+
+The current `user_memories` system treats every extracted fact (e.g., "Studying for JLPT," "Prefers morning sessions") as an isolated string with no relationship to other facts and no concept of time. 
+
+This creates three critical failures in the assistant's ability to act like a real human:
+1. **No Contextual Relationships:** The system cannot understand how facts interact (e.g., that studying JLPT is related to a December timeline). 
+2. **Trait Inference vs. State Delta:** Because facts are flat, generating a greeting or "mood" insight often results in robotic, psychoanalytical trait inferences (e.g., "You seem anxious about deadlines"). A human assistant doesn't psychoanalyze; they notice *changes in state* (e.g., "You haven't mentioned JLPT in two weeks, still on track?").
+3. **Recency Bias & Silence:** The current system treats all "silence" equally. If a user doesn't mention a short-term driver's test, it's relevant. If they don't mention a marathon that is 6 months away, it's normal. The current system cannot differentiate between these temporal horizons.
+
+Additionally, the task creation engine is currently too eager—creating tasks without explicit user consent—and research tasks lack a structured "intent", causing them to fail blindly without a retry mechanism.
+
+## The Solution: Semantic Graph Search & Temporal Edges
+
+To solve this, we are introducing a **Semantic Graph Search** mechanism built on a **Temporal Knowledge Graph**. 
+
+**Why it is important:**
+Instead of storing isolated facts, we will store **Nodes** (Entities like "JLPT" or "Rachel") connected by **Edges** (Relationships like "is planning"). Crucially, every edge has a `valid_from` and `valid_until` timestamp. 
+By introducing this Semantic Graph, the system can perform **State-Delta Detection**. Instead of guessing the user's mood, the system queries the graph to see *what has changed* since last week. It allows the assistant to gracefully handle goals of varying temporal scales (daily vs. monthly) by applying **Differential Decay** (e.g., knowing not to drop a long-term goal just because it hasn't been mentioned in a few days).
 
 ## User Review Required
 
-Please review the **Memory Architecture** section. We have a choice between keeping the stack simple (Postgres + pgvector) or introducing a dedicated Graph Database (like Neo4j) to map complex relationships.
-
-## 1. Backend-Only Task Loop
-
-You are completely right: the task lifecycle must be driven entirely by the backend. The frontend is just a "dumb" terminal for voice calls. Here is how the three steps execute on the server:
-
-### Step 1: Ingestion & Research (The Agent Router)
-1.  **Audio In**: User speaks to the app. The audio streams via WebRTC to our backend.
-2.  **STT & Intent**: Backend converts speech to text. An SLM (Small Language Model) analyzes the intent.
-3.  **Research Tool**: If the task requires external info (like the JLPT exam dates), the SLM triggers an LLM-powered "Research Tool" to scrape the web and return structured JSON (dates, deadlines, URLs).
-
-### Step 2: Task State Machine (Database)
-Instead of just "setting a reminder date", the backend breaks the researched data into a **Task Tree** in the PostgreSQL database.
-*   **Parent Task**: JLPT Exam (Deadline: Dec 7).
-*   **Child Task 1**: Registration Window (Status: `pending_registration`, Window: Sep 1 - Sep 15).
-*   **Child Task 2**: Study Plan (Status: `blocked_by_registration`).
-
-### Step 3: The Orchestrator (Daily Loop)
-1.  **Cron/Background Worker**: A backend scheduler (e.g., `APScheduler` or a Celery worker) runs every hour.
-2.  **State Evaluation**: It queries the PostgreSQL `tasks` table: *Which tasks have entered their action window based on today's date?*
-3.  **Proactive Outreach**: If Child Task 1 (Registration) is active today, the backend triggers an outgoing WebRTC call to the user via LiveKit, passing the context to the TTS engine: *"Hey, the JLPT registration opened today. Here is the link..."*
+> [!IMPORTANT]
+> Please review the expanded theoretical approach and the concrete implementation steps below. Once approved, I will begin the code modifications.
 
 ---
 
-## 2. Memory Layer: Graph DB vs. Vector DB
+## Proposed Changes (The "How")
 
-You raised an excellent point about using a Knowledge Graph to understand semantic relationships better. 
+### 1. Database Schema: Temporal Knowledge Graph
+We will introduce new relational tables in PostgreSQL that act as a Graph database.
 
-**Vector DBs (like Pinecone, pgvector)** are great for *semantic similarity*. If you say "I need to study," it can find a past memory like "User is taking a Japanese test."
-**Graph DBs (like Neo4j)** are great for *explicit relationships*. (User) -[REGISTERED_FOR]-> (JLPT Exam) -[REQUIRES]-> (Passport).
+#### [NEW] `models/entity.py`
+- **Why:** To give the system concrete "Nodes" to attach information to, rather than free-text blobs.
+- **How:** Create `Entity` (`entities` table: `id`, `user_id`, `type`, `name`, `summary`) and `EntityEdge` (`entity_edges` table: `id`, `user_id`, `source_id`, `target_id`, `relation`, `valid_from`, `valid_until`, `horizon_scale`). The `horizon_scale` (short/medium/long) dictates how fast this goal decays.
 
-**Recommendation: The Hybrid Approach**
-Do we *need* Pinecone or a dedicated Graph DB? 
-1.  **Option A (Simplest & Recommended for MVP):** We use **PostgreSQL with the `pgvector` extension** combined with a framework like **Mem0**. Mem0 is an open-source memory layer that natively handles extracting both vector embeddings AND graph-like relationships and can store them together in Postgres. This gives you the power of semantic search and relationship mapping without managing three different database clusters.
-2.  **Option B (Enterprise Grade):** Use **Neo4j**. Neo4j recently added vector search capabilities. This means it acts as a Graph DB natively, but can also do Pinecone-style vector lookups in the same query. 
+#### [NEW] `models/reflection.py`
+- **Why:** To store the high-level insights generated from the graph deltas.
+- **How:** Create `Reflection` (`reflections` table: `id`, `user_id`, `content`) and `MoodSignal` (`mood_signals` table: `id`, `entity_id`, `valence`). Valence acts as a tone-modifier (e.g., `trending_negative`), not a fact spoken out loud.
 
-*For this build, I suggest Option A: PostgreSQL + pgvector + Mem0 to handle both relational tables and complex memory graphs in one unified place.*
+#### [MODIFY] `db/session.py`
+- Add initialization for the new tables (`entities`, `entity_edges`, `reflections`, `mood_signals`).
 
 ---
 
-## 3. Features We Will Build
+### 2. Memory Extraction: Entity Resolution & Differential Decay
 
-Here is the exact feature list we will implement on the backend to make this work:
+#### [MODIFY] `services/memory/memory_service.py`
+- **How:** Update `remember()` to perform **Entity Resolution**. We will prompt the async LLM to output subject-predicate-object triples. It will merge new entity mentions with existing Nodes.
+- **How:** Implement **Temporal Invalidation**. When a new edge contradicts an old one (e.g., "I pushed the driver's test to next Friday"), we do *not* delete the old edge. We set `valid_until = today` on the old edge and create a new one. This preserves the history of the change.
 
-### Core Infrastructure
-*   **FastAPI Web Server**: The central hub handling requests and API routes.
-*   **LiveKit Integration**: A WebRTC server setup to handle real-time, low-latency audio streams between the backend and the mobile app.
+---
 
-### AI & Voice Pipeline
-*   **STT/TTS Services**: Integration with Deepgram (or similar) for fast Speech-to-Text and a high-quality Text-to-Speech provider for the agent's voice.
-*   **SLM/LLM Router**: The logic layer that decides if a user's prompt can be answered immediately, requires web research, or requires updating a database task.
+### 3. Reflections: State-Delta Detection
 
-### Task Management Engine
-*   **PostgreSQL Database Models**: SQLAlchemy schemas for the `tasks` table, supporting parent/child relationships, states, and completion conditions.
-*   **Background Scheduler**: `APScheduler` integration to run the continuous loop that checks for due tasks and initiates proactive agent calls.
+#### [NEW] `services/memory/reflection_service.py`
+- **How:** Create a multi-scale background job (Daily, Weekly, Monthly sweeps).
+- **How:** This job will diff the knowledge graph to find what changed (the "delta"). It will apply **Differential Decay**, meaning it checks up on short-term goals daily, but only checks long-term goals monthly, generating "Check-in" reflections when a goal goes suspiciously quiet.
 
-### Memory System
-*   **Mem0 Integration**: A memory extraction pipeline that listens to conversations and silently saves facts and entity relationships to the database via `pgvector`.
+#### [MODIFY] `services/engagement/engagement_service.py`
+- **How:** Update `generate_greeting()` to ingest these generated *Reflections* and *Mood Signals* rather than raw facts, outputting highly contextual, continuity-aware greetings.
+
+---
+
+### 4. Fix: Autonomous Task Creation & User Consent
+The system currently creates tasks without asking, leading to "ghost tasks."
+
+#### [MODIFY] `services/ai/slm.py`
+- **How:** Inject a strict behavioral rule into the `system_prompt` for the Groq SLM: "If research fails or a dependency is noted, report the failure to the user and ASK if they want a reminder created. NEVER invoke `create_task` without explicit user confirmation."
+
+---
+
+### 5. Fix: Structured Research Intents & Retries
+Current background research tasks fail silently because they don't know exactly what to query or when to try again.
+
+#### [MODIFY] `models/task.py`
+- **How:** Document the expected schema for the `context` JSONB column to include `research_intent` (containing `query`, `success_condition`, `on_failure`).
+
+#### [MODIFY] `services/tasks/task_service.py`
+- **How:** Update the `create_task` tool schema so the SLM is forced to define the specific search `query` and `success_condition` when `requires_research` is True.
+
+#### [MODIFY] `services/scheduler/scheduler_service.py`
+- **How:** Update the polling logic. When the scheduler picks up a research task, it uses `research_intent.query`. If the result fails the `success_condition` (e.g., the registration link isn't live yet), it follows the `on_failure` directive to bump the `due_at` date forward by a specific interval (e.g., 24 hours) to automatically retry.
+
+### 6. Fix: Graceful SLM to LLM Fallback
+The SLM often fails to construct strictly formatted JSON tool calls when user requests are inherently vague (e.g. throwing `openai.APIError`).
+
+#### [MODIFY] `services/ai/slm.py`
+- **How:** Catch `openai.APIError` natively within the streaming completion loop. If the error implies a tool-formatting failure, cleanly abort the run and yield a `fallback` event instead of crashing.
+
+#### [MODIFY] `main.py`
+- **How:** Update the `_produce_text` orchestrator to listen for the `fallback` event. When detected, immediately escalate the entire conversational context to the smarter `OpenRouterLLM` (which has better reasoning to either parse the vague intent or ask the user a clarifying question).
+
+## Verification Plan
+
+### Automated Tests
+- Validate that `memory_service.remember` caps `valid_until` instead of deleting when resolving a contradiction.
+- Validate that the scheduler correctly reschedules a task (bumps `due_at`) when a `success_condition` fails.
+
+### Manual Verification
+- **Graph Test:** Tell the assistant "I am studying for the JLPT." Then, "I decided to drop the JLPT." Verify the graph edge is invalidated temporally, not deleted.
+- **Consent Test:** Ask "When does the JLPT open?" Verify the assistant fails gracefully and *asks* for permission to create a polling task.
+- **Retry Test:** Create a task looking for a known dead URL. Verify the scheduler attempts it, evaluates the failure condition, and bumps the deadline to the future autonomously.

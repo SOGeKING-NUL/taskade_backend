@@ -100,6 +100,41 @@ async def find_task(session: AsyncSession, user_id: str, needle: str | None) -> 
     return matches[0]
 
 
+async def find_relevant_tasks(
+    session: AsyncSession, user_id: str, text: str, limit: int = 3
+) -> list[Task]:
+    """
+    Deterministically scan free text (the user's raw utterance) for ACTIVE
+    tasks it might be referring to, by title word-overlap — same scoring
+    `find_task` uses, just applied against a whole sentence instead of a
+    single named reference.
+
+    This exists so the pipeline can proactively surface a task's stored
+    context (research links, notes) BEFORE the model decides which tool to
+    call — removing reliance on model judgment for "is this about something
+    I already tracked," which is unreliable by nature. False positives here
+    are cheap (one extra ignored hint); false negatives are the actual bug
+    class this fixes, so the match is intentionally permissive (>=1
+    significant overlapping word).
+    """
+    words = _words(text) - _MATCH_STOPWORDS
+    words = {w for w in words if len(w) > 1}
+    if not words:
+        return []
+
+    rows = (
+        await session.execute(select(Task).where(Task.user_id == user_id))
+    ).scalars().all()
+    active = [t for t in rows if t.status not in _CLOSED]
+    if not active:
+        return []
+
+    scored = [(len(words & _words(t.title)), t) for t in active]
+    scored = [(n, t) for n, t in scored if n > 0]
+    scored.sort(key=lambda x: -x[0])
+    return [t for _, t in scored[:limit]]
+
+
 async def create_task(
     session: AsyncSession,
     user_id: str,

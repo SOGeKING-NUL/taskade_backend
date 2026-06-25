@@ -64,6 +64,29 @@ TASK_TOOL_DECLARATIONS = [
                         "type": "boolean",
                         "description": "True if external/current info is needed to fill in dates/details.",
                     },
+                    "research_query": {
+                        "type": "string",
+                        "description": (
+                            "When needs_research is true, the EXACT search query to use when "
+                            "the scheduler polls for this task in the background. Be specific "
+                            "(e.g. 'JLPT N5 registration link India December 2026 session')."
+                        ),
+                    },
+                    "success_condition": {
+                        "type": "string",
+                        "description": (
+                            "When needs_research is true, what constitutes a successful search "
+                            "result (e.g. 'Find a valid registration URL', 'Confirm the exam date'). "
+                            "The scheduler uses this to decide whether to keep retrying."
+                        ),
+                    },
+                    "retry_interval_days": {
+                        "type": "integer",
+                        "description": (
+                            "When needs_research is true and the search fails, how many days to "
+                            "wait before retrying. Default: 7."
+                        ),
+                    },
                     "user_confirmed": {
                         "type": "boolean",
                         "description": (

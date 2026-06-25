@@ -74,7 +74,13 @@ class Task(Base):
     )
 
     def to_brief(self) -> dict:
-        """Compact dict for tool results / API responses."""
+        """Compact dict for tool results / API responses.
+
+        Includes `context` (research findings/links, research_intent, notes) —
+        without this, a task's stored research is invisible to `query_tasks`,
+        so the model has no way to answer "what was the link" except by
+        re-researching from scratch.
+        """
         return {
             "id": self.id,
             "title": self.title,
@@ -84,4 +90,5 @@ class Task(Base):
             "due_at": self.due_at.isoformat() if self.due_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "parent_id": self.parent_id,
+            "context": self.context,
         }

@@ -7,10 +7,12 @@ Mem0/pgvector vector search touches only this file):
     recall(session, user_id, limit)  -> list[str]   # fast DB read, hot path
     remember(user_id, user_text, assistant_text)    # fire-and-forget, own session
 
-`remember` runs one LLM extraction pass that pulls 0-N durable facts/preferences
-out of the latest exchange, skips anything already known (cheap textual dedupe),
-and inserts the rest. It is never awaited inline — `main.py` schedules it as a
-background task after a turn completes, so it never adds latency to the user.
+`remember` runs two extraction passes in parallel:
+  1. The original flat-fact extraction (UserMemory rows — backward compat).
+  2. The new graph extraction (entities + temporal edges + mood signals).
+
+Both are fire-and-forget.  The graph path will eventually replace the flat
+path once trust is established; for now both run side-by-side.
 """
 
 import json
@@ -61,8 +63,8 @@ async def recall(session, user_id: str, limit: int | None = None) -> list[str]:
     return [r.content for r in rows]
 
 
-async def remember(user_id: str, user_text: str, assistant_text: str) -> None:
-    """Extract + store durable facts from one exchange. Fire-and-forget."""
+async def _flat_remember(user_id: str, user_text: str, assistant_text: str) -> None:
+    """Original flat-fact extraction (backward compat, will be retired)."""
     exchange = f"User: {user_text}\nAssistant: {assistant_text}"
     try:
         resp = await _client.chat.completions.create(
@@ -77,7 +79,7 @@ async def remember(user_id: str, user_text: str, assistant_text: str) -> None:
         payload = json.loads(resp.choices[0].message.content or "{}")
         candidates = payload.get("memories", []) or []
     except Exception as exc:  # noqa: BLE001
-        logger.warning("memory extraction failed: %s", exc)
+        logger.warning("flat memory extraction failed: %s", exc)
         return
 
     if not candidates:
@@ -97,4 +99,29 @@ async def remember(user_id: str, user_text: str, assistant_text: str) -> None:
             added += 1
         if added:
             await session.commit()
-            logger.info("remembered %d new fact(s) for %s", added, user_id)
+            logger.info("remembered %d new flat fact(s) for %s", added, user_id)
+
+
+async def remember(user_id: str, user_text: str, assistant_text: str) -> None:
+    """Extract + store durable facts from one exchange. Fire-and-forget.
+
+    Runs both the legacy flat-fact extraction AND the new graph extraction in
+    parallel.  Each is independently error-safe.
+    """
+    # Import here to avoid circular imports at module level.
+    from services.memory.graph_service import extract_and_store
+
+    # Flat facts (backward compat — will be retired once graph is trusted).
+    try:
+        await _flat_remember(user_id, user_text, assistant_text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("flat remember failed: %s", exc)
+
+    # Graph extraction (new path).
+    try:
+        edges = await extract_and_store(user_id, user_text, assistant_text)
+        if edges:
+            logger.info("graph remember: %d edge(s) for %s", edges, user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("graph remember failed: %s", exc)
+

@@ -53,8 +53,22 @@ async def create_task(args: dict, session_context: dict) -> dict:
     context = None
     research_summary = args.get("research_summary")
     source_links = args.get("source_links")
+    research_query = args.get("research_query")
+    success_condition = args.get("success_condition")
+    retry_interval = args.get("retry_interval_days")
+
     if research_summary or source_links:
         context = {"research": {"summary": research_summary, "links": source_links or []}}
+
+    # When the task needs background research polling, store the structured
+    # intent so the scheduler knows exactly what to search for and when to stop.
+    if research_query or success_condition:
+        context = context or {}
+        context["research_intent"] = {
+            "query": research_query or "",
+            "success_condition": success_condition or "",
+            "retry_interval_days": retry_interval or 7,
+        }
 
     async with async_session() as session:
         task, parent = await svc.create_task(

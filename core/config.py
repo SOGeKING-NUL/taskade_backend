@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 _project_root = Path(__file__).resolve().parent.parent
 load_dotenv(_project_root / ".env")
 
-
+ 
 class Settings:
     """Typed settings pulled from environment variables."""
 

@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 from openai import AsyncOpenAI
+import openai
 
 from core.config import settings
 from services.tools.schemas import get_tool_declarations
@@ -147,37 +148,44 @@ class GroqSLM:
             assistant_content = ""
             tool_calls: dict[int, dict] = {}
 
-            stream = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=get_tool_declarations(),
-                tool_choice="auto",
-                stream=True,
-                temperature=0.3,
-            )
+            try:
+                stream = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=get_tool_declarations(),
+                    tool_choice="auto",
+                    stream=True,
+                    temperature=0.3,
+                )
 
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
 
-                if delta.content:
-                    # Buffer only — we can't know if this is the spoken final
-                    # answer until the round ends without any tool calls.
-                    assistant_content += delta.content
+                    if delta.content:
+                        # Buffer only — we can't know if this is the spoken final
+                        # answer until the round ends without any tool calls.
+                        assistant_content += delta.content
 
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        slot = tool_calls.setdefault(
-                            tc.index, {"id": None, "name": "", "args": ""}
-                        )
-                        if tc.id:
-                            slot["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                slot["name"] = tc.function.name
-                            if tc.function.arguments:
-                                slot["args"] += tc.function.arguments
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            slot = tool_calls.setdefault(
+                                tc.index, {"id": None, "name": "", "args": ""}
+                            )
+                            if tc.id:
+                                slot["id"] = tc.id
+                            if tc.function:
+                                if tc.function.name:
+                                    slot["name"] = tc.function.name
+                                if tc.function.arguments:
+                                    slot["args"] += tc.function.arguments
+            except openai.APIError as exc:
+                if "Failed to call a function" in str(exc) or "adjust your prompt" in str(exc) or "tool" in str(exc).lower():
+                    logger.warning("SLM failed tool formatting: %s. Yielding fallback event.", exc)
+                    yield {"type": "fallback", "reason": str(exc)}
+                    return
+                raise
 
             if not tool_calls:
                 # Final answer round — safe to speak now.

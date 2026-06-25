@@ -31,6 +31,7 @@ from services.scheduler.scheduler_service import start_scheduler, shutdown_sched
 from services.voice.stt_deepgram import DeepgramStreamingSTT
 from services.voice.tts import SarvamTTS
 from services.ai.slm import GroqSLM
+from services.ai.llm import OpenRouterLLM
 
 # ── Logging ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -98,12 +99,22 @@ async def _send_json(ws: WebSocket, data: dict) -> None:
         pass
 
 
-async def _memory_context(session_context: dict) -> str:
+async def _memory_context(session_context: dict, transcript: str) -> str:
     """
-    Build a short system block of what we know about the user (Milestone 5),
+    Build a short system block of what we know about the user (Milestone 5+6),
     injected into the SLM's prompt each turn — so `research` / `create_task` run
-    with the user's known prefs/facts in view. Profile fields come free from
-    session context; recalled facts are a fast DB read.
+    with the user's known prefs/facts in view.
+
+    Pulls from five sources:
+      1. Profile fields (from session context, loaded at connect time).
+      2. Flat recalled facts (backward-compat UserMemory rows).
+      3. Active knowledge-graph edges (temporal graph).
+      4. Recent reflections + mood signals (state-delta insights).
+      5. Tasks deterministically matched against THIS turn's transcript — so a
+         task's stored research/links are already in front of the model before
+         it ever decides whether to call `research` or `query_tasks`. This is
+         a fixed DB lookup, not a model judgment call, so it can't be skipped
+         by a routing mistake the way a tool choice can.
     """
     user_id = session_context["user_id"]
     profile = session_context.get("profile") or {}
@@ -121,12 +132,77 @@ async def _memory_context(session_context: dict) -> str:
 
     try:
         async with async_session() as session:
+            # Legacy flat facts.
             facts = await memory_service.recall(session, user_id)
-        if facts:
-            lines.append("Things to remember about the user:")
-            lines += [f"- {f}" for f in facts]
+            if facts:
+                lines.append("Remembered facts about the user:")
+                lines += [f"- {f}" for f in facts]
+
+            # ── Temporal Knowledge Graph context ─────────────────────
+            from services.memory import graph_service, reflection_service
+
+            edges = await graph_service.get_active_edges(session, user_id, limit=20)
+            if edges:
+                names = await graph_service.get_entity_name_map(session, user_id)
+                lines.append("Knowledge graph (active relationships):")
+                for edge in edges:
+                    src = names.get(edge.source_id, "?")
+                    tgt = names.get(edge.target_id, "?")
+                    target_info = ""
+                    if edge.target_date:
+                        target_info = f" (target: {edge.target_date.strftime('%b %d, %Y')})"
+                    lines.append(f"- {src} → {edge.relation} → {tgt}{target_info}")
+
+            reflections = await reflection_service.get_recent_reflections(
+                session, user_id, limit=3
+            )
+            if reflections:
+                lines.append("Recent observations (state changes):")
+                lines += [f"- {r.content}" for r in reflections]
+
+            mood = await reflection_service.get_recent_mood_summary(
+                session, user_id, limit=3
+            )
+            if mood:
+                lines.append("Topic sentiment (use to adjust tone, never say aloud):")
+                for m in mood:
+                    lines.append(f"- {m['entity']}: {m['label']} ({m['valence']:+.1f})")
+
+            # ── Deterministic task pre-retrieval (Option C) ──────────────
+            # Match THIS turn's words against the user's active task titles and
+            # surface any hits — INCLUDING their stored research/links — so the
+            # answer to "what's the link for X" is already in the prompt before
+            # the model picks a tool. A fixed DB lookup, never a model judgment.
+            relevant = await task_service.find_relevant_tasks(
+                session, user_id, transcript, limit=3
+            )
+            if relevant:
+                lines.append(
+                    "Existing tasks that may relate to what the user just said — "
+                    "CHECK THESE before calling research or creating anything; the "
+                    "answer (link, date, details) may already be here:"
+                )
+                for t in relevant:
+                    due = t.due_at.strftime("%d %b %Y") if t.due_at else "no due date"
+                    lines.append(f'- "{t.title}" (status: {t.status}, {due})')
+                    ctx = t.context or {}
+                    for key in ("research", "research_refresh"):
+                        blob = ctx.get(key) or {}
+                        if not isinstance(blob, dict):
+                            continue
+                        if blob.get("summary"):
+                            lines.append(f"    findings: {blob['summary']}")
+                        if blob.get("note"):
+                            lines.append(f"    update: {blob['note']}")
+                        for link in (blob.get("links") or []):
+                            if isinstance(link, dict) and link.get("url"):
+                                label = link.get("label") or link["url"]
+                                lines.append(f"    link: {label} — {link['url']}")
+                            elif isinstance(link, str) and link:
+                                lines.append(f"    link: {link}")
+
     except Exception as exc:  # noqa: BLE001
-        logger.warning("recall failed: %s", exc)
+        logger.warning("memory context build failed: %s", exc)
 
     if not lines:
         return ""
@@ -197,15 +273,19 @@ async def run_voice_pipeline(
             # `run_conversation` only yields SPOKEN text from a round that makes no
             # tool calls, so a pre-research/"thinking" answer is never voiced.
             messages = [{"role": "system", "content": slm_service.system_prompt}]
-            memory_msg = await _memory_context(session_context)
+            memory_msg = await _memory_context(session_context, transcript)
             if memory_msg:
                 messages.append({"role": "system", "content": memory_msg})
             messages += list(conversation_history)
             messages.append({"role": "user", "content": transcript})
 
             spoke_filler = False
+            fallback_needed = False
             async for ev in slm_service.run_conversation(messages, session_context):
-                if ev["type"] == "text":
+                if ev.get("type") == "fallback":
+                    fallback_needed = True
+                    break
+                elif ev["type"] == "text":
                     await _emit(ev["text"])
                     sentence_buf += ev["text"]
                     sentence_buf = await _push_sentences(sentence_buf)
@@ -228,6 +308,24 @@ async def run_voice_pipeline(
                         "ok": ev["ok"],
                         "summary": ev.get("summary", ""),
                     })
+
+            if fallback_needed:
+                logger.info("SLM tool formatting failed. Escalating to OpenRouterLLM...")
+                llm_service = OpenRouterLLM()
+                async for ev in llm_service.run_conversation(messages, session_context):
+                    if ev["type"] == "text":
+                        await _emit(ev["text"])
+                        sentence_buf += ev["text"]
+                        sentence_buf = await _push_sentences(sentence_buf)
+                    elif ev["type"] == "tool.start":
+                        await _send_json(ws, {"type": "tool.start", "name": ev["name"]})
+                    elif ev["type"] == "tool.result":
+                        await _send_json(ws, {
+                            "type": "tool.result",
+                            "name": ev["name"],
+                            "ok": ev["ok"],
+                            "summary": ev.get("summary", ""),
+                        })
 
             # Flush leftover text
             if sentence_buf.strip():

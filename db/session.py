@@ -43,4 +43,11 @@ async def init_db() -> None:
         await conn.execute(
             text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS location VARCHAR")
         )
+        # ── Temporal Knowledge Graph patches (Milestone 6) ───────────
+        await conn.execute(
+            text("ALTER TABLE entity_edges ADD COLUMN IF NOT EXISTS target_date TIMESTAMPTZ")
+        )
+        await conn.execute(
+            text("ALTER TABLE entity_edges ADD COLUMN IF NOT EXISTS horizon_scale VARCHAR DEFAULT 'medium'")
+        )
     logger.info("Database ready — tables ensured")
