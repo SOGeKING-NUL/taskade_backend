@@ -13,6 +13,8 @@ import ChatMessage from "./ChatMessage";
 import StatusIndicator from "./StatusIndicator";
 import ToolActivity from "./ToolActivity";
 import TasksPanel from "./TasksPanel";
+import SchedulerPanel from "./SchedulerPanel";
+import MetadataCard from "./MetadataCard";
 import { VADManager } from "../utils/vadManager";
 import { AudioPlayer } from "../utils/audioPlayer";
 
@@ -35,6 +37,7 @@ export default function VoiceChat({ accessToken }) {
   const [isConnected, setIsConnected] = useState(false);
   const [toolActivity, setToolActivity] = useState([]); // escalation + tool-call log
   const [tasks, setTasks] = useState([]); // persisted tasks (from GET /tasks)
+  const [metadataCards, setMetadataCards] = useState([]); // structured data from tools
 
   // ── Refs (survive re-renders, avoid stale closures) ────────────────
   const wsRef = useRef(null);
@@ -200,6 +203,7 @@ export default function VoiceChat({ accessToken }) {
         setStatus("processing");
         // Fresh turn — clear the previous turn's activity log
         setToolActivity([]);
+        setMetadataCards([]);
         break;
 
       // ── Tool-calling events (Milestone 1 test harness) ────────
@@ -218,6 +222,12 @@ export default function VoiceChat({ accessToken }) {
         ]);
         // A tool may have changed tasks — refresh the panel.
         fetchTasks();
+        break;
+
+      case "metadata":
+        // Structured data (links, findings, dates) for display as a
+        // clickable card — separate from the spoken response.
+        setMetadataCards((prev) => [...prev, { tool: data.tool, data: data.data }]);
         break;
 
       // ── LLM events ────────────────────────────────────────────
@@ -295,6 +305,7 @@ export default function VoiceChat({ accessToken }) {
       case "history_cleared":
         setMessages([]);
         setToolActivity([]);
+        setMetadataCards([]);
         break;
 
       default:
@@ -532,9 +543,11 @@ export default function VoiceChat({ accessToken }) {
         <div ref={messagesEndRef} />
       </main>
 
-      {/* ── Tool activity + persisted tasks (test harness) ───────────── */}
+      {/* ── Tool activity + metadata + persisted tasks + scheduler (test harness) ── */}
       <ToolActivity items={toolActivity} />
+      <MetadataCard items={metadataCards} />
       <TasksPanel tasks={tasks} />
+      <SchedulerPanel accessToken={accessToken} apiBase={API_BASE} />
 
       {/* ── Status Indicator ─────────────────────────────────────────── */}
       <footer className="controls">

@@ -50,7 +50,28 @@ TASK_TOOL_DECLARATIONS = [
                     "description": {"type": "string", "description": "Optional extra detail."},
                     "due_at": {
                         "type": "string",
-                        "description": "Optional ISO 8601 date/time the task is due, if known.",
+                        "description": (
+                            "ISO 8601 date/time the task is due. When the user gives a "
+                            "CLOCK TIME ('9pm', '3pm tonight', 'noon'), ALWAYS include "
+                            "the full time component — never collapse to midnight or "
+                            "date-only. Example: '2026-06-25T21:00:00+05:30'."
+                        ),
+                    },
+                    "window_start": {
+                        "type": "string",
+                        "description": (
+                            "Optional ISO 8601 datetime — start of a fuzzy time window "
+                            "when the user gives a loose time phrase ('Saturday evening', "
+                            "'sometime tomorrow afternoon') where a single due_at would "
+                            "overstate precision. Use INSTEAD of due_at, not alongside it."
+                        ),
+                    },
+                    "window_end": {
+                        "type": "string",
+                        "description": (
+                            "Optional ISO 8601 datetime — end of the fuzzy time window. "
+                            "Always pair with window_start."
+                        ),
                     },
                     "parent_task": {
                         "type": "string",
@@ -153,6 +174,58 @@ TASK_TOOL_DECLARATIONS = [
                     },
                 },
                 "required": ["scope"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_task",
+            "description": (
+                "Amend an EXISTING task's details — add or correct its link, fee, "
+                "due date, description, or link it to a parent/prerequisite task. "
+                "Use this (NOT create_task) whenever the user asks to add "
+                "information to, correct, or extend something already tracked — "
+                "calling create_task again would duplicate it instead of updating it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Title or id of the existing task to update (fuzzy-matched).",
+                    },
+                    "title": {"type": "string", "description": "Optional new title."},
+                    "description": {"type": "string", "description": "Optional new/extra description."},
+                    "due_at": {
+                        "type": "string",
+                        "description": "Optional new ISO 8601 due date/time, including time-of-day if given.",
+                    },
+                    "window_start": {"type": "string", "description": "Optional new fuzzy-window start."},
+                    "window_end": {"type": "string", "description": "Optional new fuzzy-window end."},
+                    "parent_task": {
+                        "type": "string",
+                        "description": "Optional title/id of an existing task to nest this under.",
+                    },
+                    "depends_on_task": {
+                        "type": "string",
+                        "description": (
+                            "Optional title/id of a prerequisite task — set this when the user "
+                            "links this task to something already tracked, even from an earlier "
+                            "turn (e.g. 'participate in the race' depends on 'register for it')."
+                        ),
+                    },
+                    "research_summary": {
+                        "type": "string",
+                        "description": "New/updated findings to store — merged with anything already saved, not overwritten.",
+                    },
+                    "source_links": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "New/updated official URLs to store — merged with anything already saved.",
+                    },
+                },
+                "required": ["task"],
             },
         },
     },

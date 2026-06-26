@@ -79,6 +79,8 @@ async def create_task(args: dict, session_context: dict) -> dict:
             parent=args.get("parent_task"),
             depends_on=args.get("depends_on_task"),
             due_at=_parse_dt(args.get("due_at")),
+            window_start=_parse_dt(args.get("window_start")),
+            window_end=_parse_dt(args.get("window_end")),
             needs_research=bool(args.get("needs_research", False)),
             context=context,
         )
@@ -90,6 +92,33 @@ async def create_task(args: dict, session_context: dict) -> dict:
             "task": task.to_brief(),
             "summary": f"Created task '{task.title}'{nested}.{blocked}",
         }
+
+
+async def update_task(args: dict, session_context: dict) -> dict:
+    user_id = _user(session_context)
+    task_ref = args.get("task", "")
+    if not task_ref:
+        return {"ok": False, "error": "missing_task", "summary": "Which task should I update?"}
+
+    async with async_session() as session:
+        task = await svc.update_task(
+            session,
+            user_id,
+            task_ref,
+            title=args.get("title"),
+            description=args.get("description"),
+            due_at=_parse_dt(args.get("due_at")),
+            window_start=_parse_dt(args.get("window_start")),
+            window_end=_parse_dt(args.get("window_end")),
+            parent=args.get("parent_task"),
+            depends_on=args.get("depends_on_task"),
+            research_summary=args.get("research_summary"),
+            source_links=args.get("source_links"),
+        )
+        if task is None:
+            return {"ok": False, "error": "task_not_found", "summary": "I couldn't find that task."}
+        await session.commit()
+        return {"ok": True, "task": task.to_brief(), "summary": f"Updated '{task.title}'."}
 
 
 async def query_tasks(args: dict, session_context: dict) -> dict:

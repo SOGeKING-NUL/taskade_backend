@@ -27,7 +27,7 @@ import services.memory.profile_service as profile_service
 import services.memory.memory_service as memory_service
 import services.engagement.engagement_service as engagement_service
 from services.auth.auth_service import authenticate_websocket, get_current_user_id, profile_fields
-from services.scheduler.scheduler_service import start_scheduler, shutdown_scheduler
+from services.scheduler.scheduler_service import start_scheduler, shutdown_scheduler, get_job_status
 from services.voice.stt_deepgram import DeepgramStreamingSTT
 from services.voice.tts import SarvamTTS
 from services.ai.slm import GroqSLM
@@ -97,6 +97,44 @@ async def _send_json(ws: WebSocket, data: dict) -> None:
         await ws.send_json(data)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _extract_presentable_metadata(tool_name: str, result: dict, args: dict) -> dict | None:
+    """Pull user-facing structured data (links, findings, dates) from a tool
+    result for display as a separate UI card — deterministic, not dependent
+    on the model choosing to recite anything correctly.
+
+    Deliberately narrow: the card should appear ONLY when the user explicitly
+    asked about a specific, already-tracked task — never as a side effect of
+    research running in the background or a task simply being created/updated.
+    That means exactly one case: `query_tasks` called with
+    `scope == "specific_task"`. Everything else returns None.
+
+    Returns None when there's nothing worth surfacing.
+    """
+    if tool_name != "query_tasks" or args.get("scope") != "specific_task":
+        return None
+
+    tasks_data = result.get("tasks") or []
+    items = []
+    for t in tasks_data:
+        if not isinstance(t, dict):
+            continue
+        item: dict = {"title": t.get("title", "")}
+        if t.get("due_at"):
+            item["due_at"] = t["due_at"]
+        ctx = t.get("context") or {}
+        for key in ("research", "research_refresh"):
+            blob = ctx.get(key) or {}
+            if isinstance(blob, dict):
+                if blob.get("links"):
+                    item.setdefault("links", []).extend(blob["links"])
+                if blob.get("summary"):
+                    item["summary"] = blob["summary"]
+        if len(item) > 1:  # more than just title
+            items.append(item)
+
+    return {"tasks": items} if items else None
 
 
 async def _memory_context(session_context: dict, transcript: str) -> str:
@@ -308,6 +346,15 @@ async def run_voice_pipeline(
                         "ok": ev["ok"],
                         "summary": ev.get("summary", ""),
                     })
+                    # Dispatch structured metadata as a separate channel for
+                    # the frontend to render as a clickable card — never spoken.
+                    metadata = _extract_presentable_metadata(ev["name"], ev, ev.get("args") or {})
+                    if metadata:
+                        await _send_json(ws, {
+                            "type": "metadata",
+                            "tool": ev["name"],
+                            "data": metadata,
+                        })
 
             if fallback_needed:
                 logger.info("SLM tool formatting failed. Escalating to OpenRouterLLM...")
@@ -326,6 +373,13 @@ async def run_voice_pipeline(
                             "ok": ev["ok"],
                             "summary": ev.get("summary", ""),
                         })
+                        metadata = _extract_presentable_metadata(ev["name"], ev, ev.get("args") or {})
+                        if metadata:
+                            await _send_json(ws, {
+                                "type": "metadata",
+                                "tool": ev["name"],
+                                "data": metadata,
+                            })
 
             # Flush leftover text
             if sentence_buf.strip():
@@ -689,6 +743,20 @@ async def due_reminders(user_id: str = Depends(get_current_user_id)):
     if due:
         logger.info("Delivered %d due reminder(s) via /reminders/due", len(due))
     return {"count": len(due), "tasks": briefs, "message": message}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  Scheduler & research-retry debug endpoint
+# ═════════════════════════════════════════════════════════════════════════
+@app.get("/debug/scheduler")
+async def scheduler_debug(user_id: str = Depends(get_current_user_id)):
+    """Return APScheduler job status + the calling user's research-retry
+    schedule.  Per-user scoped — no cross-user data exposure.  Purely
+    read-only introspection for the debug panel."""
+    jobs = get_job_status()
+    async with async_session() as session:
+        research_schedule = await task_service.get_research_schedule(session, user_id)
+    return {"jobs": jobs, "research_schedule": research_schedule}
 
 
 # ═════════════════════════════════════════════════════════════════════════

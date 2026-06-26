@@ -179,6 +179,25 @@ def start_scheduler() -> AsyncIOScheduler:
     return _scheduler
 
 
+def get_job_status() -> list[dict]:
+    """Return a snapshot of every APScheduler job — id, next run time, trigger.
+
+    Purely read-only introspection; the scheduler's actual behaviour is
+    unaffected.  Returns an empty list when the scheduler hasn't started.
+    """
+    if _scheduler is None:
+        return []
+    jobs = _scheduler.get_jobs()
+    out = []
+    for job in jobs:
+        out.append({
+            "id": job.id,
+            "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+            "trigger": str(job.trigger),
+        })
+    return out
+
+
 def shutdown_scheduler() -> None:
     """Stop the scheduler on app shutdown."""
     global _scheduler

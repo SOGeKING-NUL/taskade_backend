@@ -180,6 +180,74 @@ async def create_task(
     return task, parent_task
 
 
+async def update_task(
+    session: AsyncSession,
+    user_id: str,
+    task_ref: str,
+    *,
+    title: str | None = None,
+    description: str | None = None,
+    due_at: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+    parent: str | None = None,
+    depends_on: str | None = None,
+    research_summary: str | None = None,
+    source_links: list | None = None,
+) -> Task | None:
+    """
+    Patch fields on an EXISTING task — distinct from update_status (status-only).
+    This is what 'add the link/fee to that reminder' should call instead of
+    create_task, so amending a task doesn't produce a duplicate row.
+
+    Research findings are MERGED into context.research, not overwritten — calling
+    this twice (e.g. once for the link, later for a date change) doesn't clobber
+    what was already stored.
+    """
+    task = await find_task(session, user_id, task_ref)
+    if task is None:
+        return None
+
+    if title:
+        task.title = title
+    if description:
+        task.description = description
+    if due_at is not None:
+        task.due_at = due_at
+    if window_start is not None:
+        task.window_start = window_start
+    if window_end is not None:
+        task.window_end = window_end
+
+    if parent:
+        parent_task = await find_task(session, user_id, parent)
+        if parent_task is not None:
+            task.parent_id = parent_task.id
+            if parent_task.task_type != "milestone":
+                parent_task.task_type = "milestone"
+
+    if depends_on:
+        dep_task = await find_task(session, user_id, depends_on)
+        if dep_task is not None:
+            task.depends_on_id = dep_task.id
+            if dep_task.status not in _CLOSED and task.status not in _CLOSED:
+                task.status = "blocked"
+
+    if research_summary or source_links:
+        ctx = dict(task.context or {})
+        existing = dict(ctx.get("research") or {})
+        if research_summary:
+            existing["summary"] = research_summary
+        if source_links:
+            existing["links"] = source_links
+        ctx["research"] = existing
+        task.context = ctx
+
+    await session.flush()
+    logger.info("update_task → %s (%s)", task.title, task.id)
+    return task
+
+
 async def get_tasks(
     session: AsyncSession,
     user_id: str,
@@ -332,3 +400,42 @@ async def consume_due_reminders(
         return [], ""
     await mark_reminded(session, due)
     return due, _reminder_message(due)
+
+
+async def get_research_schedule(
+    session: AsyncSession, user_id: str
+) -> list[dict]:
+    """Every task with `requires_research=True`, with its structured research
+    intent and last refresh outcome surfaced for the debug panel.
+
+    Sorted by `next_attempt_at` soonest-first; legacy tasks without a
+    structured intent sort last (they poll on every sweep).
+    """
+    rows = (
+        await session.execute(
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.requires_research.is_(True),
+            )
+        )
+    ).scalars().all()
+
+    schedule = []
+    for t in rows:
+        ctx = t.context or {}
+        intent = ctx.get("research_intent") or {}
+        refresh = ctx.get("research_refresh") or {}
+        schedule.append({
+            "task_id": t.id,
+            "title": t.title,
+            "status": t.status,
+            "query": intent.get("query", ""),
+            "success_condition": intent.get("success_condition", ""),
+            "retry_interval_days": intent.get("retry_interval_days"),
+            "next_attempt_at": intent.get("next_attempt_at"),
+            "last_outcome": refresh.get("note") or refresh.get("summary") or None,
+        })
+
+    # Soonest retry first; None sorts last.
+    schedule.sort(key=lambda s: s["next_attempt_at"] or "9999")
+    return schedule
