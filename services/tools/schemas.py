@@ -51,10 +51,24 @@ TASK_TOOL_DECLARATIONS = [
                     "due_at": {
                         "type": "string",
                         "description": (
-                            "ISO 8601 date/time the task is due. When the user gives a "
-                            "CLOCK TIME ('9pm', '3pm tonight', 'noon'), ALWAYS include "
-                            "the full time component — never collapse to midnight or "
-                            "date-only. Example: '2026-06-25T21:00:00+05:30'."
+                            "ISO 8601 date/time the task is due, in INDIAN time (IST, "
+                            "+05:30) unless the user's profile says otherwise. When the "
+                            "user gives a CLOCK TIME ('9pm', '3pm tonight', 'noon'), "
+                            "ALWAYS include the full time component — never collapse to "
+                            "midnight or date-only. Example: '2026-06-25T21:00:00+05:30'."
+                        ),
+                    },
+                    "reminder_offsets_minutes": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": (
+                            "When to fire reminder notifications, as minutes BEFORE "
+                            "due_at. 0 means at the event time. Default is [0, 10] (one at "
+                            "the time and one 10 minutes before) — you usually DON'T need "
+                            "to set this. Set it ONLY when the user asks for a specific "
+                            "lead time: 'remind me 30 minutes before' → [0, 30]; 'remind "
+                            "me a day before and at the time' → [0, 1440]; 'just at the "
+                            "time' → [0]."
                         ),
                     },
                     "window_start": {
@@ -199,7 +213,20 @@ TASK_TOOL_DECLARATIONS = [
                     "description": {"type": "string", "description": "Optional new/extra description."},
                     "due_at": {
                         "type": "string",
-                        "description": "Optional new ISO 8601 due date/time, including time-of-day if given.",
+                        "description": (
+                            "Optional new ISO 8601 due date/time in IST (+05:30), "
+                            "including time-of-day if given. Changing it re-schedules "
+                            "this task's reminder notifications."
+                        ),
+                    },
+                    "reminder_offsets_minutes": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": (
+                            "Optional — only when also changing due_at AND the user "
+                            "wants specific lead times. Minutes before due_at; 0 = at the "
+                            "time. Defaults to [0, 10] when omitted."
+                        ),
                     },
                     "window_start": {"type": "string", "description": "Optional new fuzzy-window start."},
                     "window_end": {"type": "string", "description": "Optional new fuzzy-window end."},

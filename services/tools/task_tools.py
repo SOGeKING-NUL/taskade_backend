@@ -7,11 +7,12 @@ tool-calling layer already expects (with a `summary` for the LLM to speak).
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from db.session import async_session
 from models.task import Task
 import services.tasks.task_service as svc
+from utils import timez
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +25,26 @@ def _parse_dt(value: str | None) -> datetime | None:
     except (ValueError, AttributeError):
         logger.warning("Could not parse datetime: %r", value)
         return None
-    # A model may emit a date with no timezone ("2026-12-06") — treat as UTC so
-    # it stores and compares consistently against tz-aware DB values.
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    # A model may emit a clock time with no timezone ("2026-06-29T20:00:00") —
+    # interpret it as LOCAL time (the configured default, e.g. IST), not UTC, so
+    # "8pm" means 8pm where the user is. Stored tz-aware for consistent compares.
+    return timez.ensure_aware(dt)
+
+
+def _parse_offsets(value) -> list[int] | None:
+    """Sanitize the model-supplied reminder offsets (minutes before due). Returns
+    None when nothing usable was given, so the service applies its default."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    out: list[int] = []
+    for v in value:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n >= 0:
+            out.append(n)
+    return out or None
 
 
 def _user(session_context: dict) -> str:
@@ -83,6 +99,7 @@ async def create_task(args: dict, session_context: dict) -> dict:
             window_end=_parse_dt(args.get("window_end")),
             needs_research=bool(args.get("needs_research", False)),
             context=context,
+            reminder_offsets=_parse_offsets(args.get("reminder_offsets_minutes")),
         )
         await session.commit()
         nested = f" (nested under '{parent.title}')" if parent else ""
@@ -114,6 +131,7 @@ async def update_task(args: dict, session_context: dict) -> dict:
             depends_on=args.get("depends_on_task"),
             research_summary=args.get("research_summary"),
             source_links=args.get("source_links"),
+            reminder_offsets=_parse_offsets(args.get("reminder_offsets_minutes")),
         )
         if task is None:
             return {"ok": False, "error": "task_not_found", "summary": "I couldn't find that task."}

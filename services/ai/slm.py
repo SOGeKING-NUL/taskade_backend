@@ -20,7 +20,6 @@ a stale pre-research answer from being voiced over the real, researched one.
 import json
 import logging
 import re
-from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 from openai import AsyncOpenAI
@@ -57,9 +56,12 @@ def _build_system_prompt() -> str:
     # Built per-call so "today" never goes stale on a long-running process — the
     # model needs the real current date to resolve recurring events and to know
     # which time-varying facts it must verify with research.
-    now = datetime.now(timezone.utc)
+    # Anchor "now" in the user's local zone (IST by default) so the model resolves
+    # clock times ("8pm") to the right instant and stamps due_at with +05:30.
+    from utils import timez
+    now = timez.now_local()
     today = now.strftime("%A, %d %B %Y")
-    current_time = now.strftime("%H:%M UTC")
+    current_time = f"{now.strftime('%H:%M')} {timez.tz_label()}"
     return (
         "You are a voice assistant whose job is to help the user manage "
         "REMINDERS, PLANS, and TASKS — and to research the real-world facts those "

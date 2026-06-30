@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.user import User
 from models.task import Task
+import services.reminders.reminder_service as reminder_service
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,7 @@ async def create_task(
     window_end: datetime | None = None,
     needs_research: bool = False,
     context: dict | None = None,
+    reminder_offsets: list[int] | None = None,
 ) -> tuple[Task, Task | None]:
     await ensure_user(session, user_id)
 
@@ -177,6 +179,11 @@ async def create_task(
 
     await session.flush()
     logger.info("create_task → %s (%s)", task.title, task.id)
+
+    # Generate the reminder ledger rows for this task's due time. No-op when the
+    # task has no due_at (fuzzy window / undated), and skips any offset whose
+    # moment is already in the past.
+    await reminder_service.sync_for_task(session, task, reminder_offsets)
     return task, parent_task
 
 
@@ -194,6 +201,7 @@ async def update_task(
     depends_on: str | None = None,
     research_summary: str | None = None,
     source_links: list | None = None,
+    reminder_offsets: list[int] | None = None,
 ) -> Task | None:
     """
     Patch fields on an EXISTING task — distinct from update_status (status-only).
@@ -245,6 +253,12 @@ async def update_task(
 
     await session.flush()
     logger.info("update_task → %s (%s)", task.title, task.id)
+
+    # Re-arm reminders only when the due time actually changed (a link/fee/title
+    # edit leaves `due_at` None here, so existing — including already-sent —
+    # reminders are left untouched). A new due time regenerates the ledger rows.
+    if due_at is not None:
+        await reminder_service.sync_for_task(session, task, reminder_offsets)
     return task
 
 
@@ -326,6 +340,11 @@ async def update_status(
         ctx.setdefault("notes", []).append(note)
         task.context = ctx
     await session.flush()
+
+    # A finished or cancelled task should never ping — stand down its still-live
+    # reminders (rows that already fired are kept as a delivery record).
+    if new_status in _CLOSED:
+        await reminder_service.cancel_for_task(session, task.id)
 
     # When a task completes, unblock anything that was waiting on it.
     unblocked: list[str] = []

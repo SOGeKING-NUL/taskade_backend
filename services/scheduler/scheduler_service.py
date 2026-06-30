@@ -34,6 +34,12 @@ import services.tasks.task_service as task_service
 import services.memory.profile_service as profile_service
 from services.research.refresh_service import refresh_watched_tasks
 import services.memory.reflection_service as reflection_service
+import services.reminders.reminder_service as reminder_service
+import services.devices.device_service as device_service
+from services.push import push_service
+from models.task import Task
+from models.reminder import Reminder
+from utils import timez
 
 logger = logging.getLogger("scheduler")
 
@@ -57,6 +63,105 @@ async def check_due_tasks() -> None:
                 user_id,
                 "; ".join(t.title for t in due),
             )
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Push delivery sweep (the outbound half — claims the ledger and sends FCM)
+# ════════════════════════════════════════════════════════════════════════
+def _build_copy(task: Task, reminder: Reminder) -> tuple[str, str, dict]:
+    """Build a clean notification title/body (no emoji, times in IST) plus the
+    data payload the mobile client uses for tap-routing and the delivery ack.
+
+    The title is just the task name; the body carries the timing. The mobile
+    client adds a small "Reminder" sub-label, so the copy itself stays plain.
+    """
+    when = timez.fmt_clock(task.due_at)
+    title = task.title
+    if reminder.offset_minutes <= 0:
+        body = f"Happening now ({when})" if when else "It's time."
+    else:
+        mins = reminder.offset_minutes
+        if mins < 60:
+            lead = f"{mins} minute{'s' if mins != 1 else ''}"
+        else:
+            hrs = mins // 60
+            lead = f"{hrs} hour{'s' if hrs != 1 else ''}"
+        body = f"Starts in {lead}" + (f" ({when})" if when else "")
+
+    data = {
+        "type": "task_reminder",
+        "task_id": task.id,
+        "reminder_id": reminder.id,
+        "offset_minutes": reminder.offset_minutes,
+        "task_title": task.title,
+        "due_at": task.due_at.isoformat() if task.due_at else "",
+    }
+    return title, body, data
+
+
+async def _deliver_one(reminder_id: str) -> None:
+    """Send a single claimed reminder and finalise its ledger row.
+
+    Three phases, each in its own short transaction — the slow network send
+    happens OUTSIDE any DB lock so claimed rows aren't held open during I/O.
+    """
+    # Phase 1 — gather (the task + the user's tokens + the copy).
+    async with async_session() as session:
+        reminder = await session.get(Reminder, reminder_id)
+        if reminder is None or reminder.status != "claimed":
+            return  # already finalised or reclaimed elsewhere
+        task = await session.get(Task, reminder.task_id)
+        if task is None or task.status in ("done", "cancelled"):
+            # Task finished/cancelled between claim and send → don't notify.
+            reminder.status = "cancelled"
+            await session.commit()
+            return
+        tokens = await device_service.tokens_for(session, reminder.user_id)
+        title, body, data = _build_copy(task, reminder)
+
+    if not tokens:
+        # Nothing to deliver to yet — hold (no attempt burned) until a device
+        # registers or the claim times out and it's retried.
+        async with async_session() as session:
+            await reminder_service.hold(session, reminder_id, "no_registered_device")
+            await session.commit()
+        return
+
+    # Phase 2 — send (no transaction held).
+    result = await push_service.send_reminder(tokens, title=title, body=body, data=data)
+
+    # Phase 3 — finalise based on the outcome.
+    async with async_session() as session:
+        for dead in result.prune_tokens:
+            await device_service.prune(session, dead)
+        if result.delivered:
+            await reminder_service.mark_sent(session, reminder_id)
+        elif result.transient:
+            await reminder_service.mark_retry(session, reminder_id, result.error)
+        else:
+            # No delivery and not a transient error → every token was invalid and
+            # has now been pruned; hold for a future device rather than burn it.
+            await reminder_service.hold(session, reminder_id, result.error or "no_valid_tokens")
+        await session.commit()
+
+
+async def deliver_due_reminders() -> None:
+    """Claim every due reminder and push it. Safe no-op until FCM is configured,
+    so the rest of the app runs unchanged without credentials."""
+    if not push_service.is_configured():
+        return
+    async with async_session() as session:
+        claimed = await reminder_service.claim_due(session)
+        ids = [r.id for r in claimed]
+        await session.commit()
+    if not ids:
+        return
+    logger.info("Push delivery: claimed %d due reminder(s)", len(ids))
+    for reminder_id in ids:
+        try:
+            await _deliver_one(reminder_id)
+        except Exception as exc:  # noqa: BLE001 — one bad reminder must not stop the rest
+            logger.warning("reminder delivery error (%s): %s", reminder_id, exc)
 
 
 def _local_now(tz_name: str) -> datetime:
@@ -144,6 +249,18 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         coalesce=True,           # collapse missed runs into one
         max_instances=1,         # never overlap sweeps
+    )
+
+    # Outbound push delivery — claims the reminder ledger and sends FCM. Self-gates
+    # to a no-op until FCM credentials are configured.
+    _scheduler.add_job(
+        deliver_due_reminders,
+        trigger="interval",
+        seconds=settings.REMINDER_DELIVERY_SECONDS,
+        id="deliver_due_reminders",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
     )
 
     # Daily research refresh — fires hourly, self-gates to the user's local
