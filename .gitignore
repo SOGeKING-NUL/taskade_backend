@@ -20,6 +20,10 @@ client/.env
 client/.env.local
 .env.local
 
+# Firebase service-account key (full admin access — never commit)
+firebase-service-account.json
+*-firebase-adminsdk-*.json
+
 # IDEs and OS files
 .vscode/
 .idea/

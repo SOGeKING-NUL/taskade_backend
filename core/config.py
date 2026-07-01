@@ -81,6 +81,39 @@ class Settings:
     # Default local hour for the daily research refresh when a profile sets none.
     DAILY_CHECKIN_HOUR: int = int(os.getenv("DAILY_CHECKIN_HOUR", "6"))
 
+    # ── Timezone ─────────────────────────────────────────────────
+    # Default IANA timezone used to interpret user-spoken clock times ("8pm") and
+    # to format notification copy. Stored datetimes stay tz-aware UTC in the DB; a
+    # per-user `profile.timezone` overrides this default when set.
+    DEFAULT_TIMEZONE: str = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
+
+    # ── Push notifications (FCM) + reminder delivery ─────────────
+    # Firebase service-account credentials. Two ways to provide them (either works;
+    # JSON takes precedence). When NEITHER is set, the delivery sweep is a safe
+    # no-op — nothing else in the app is affected.
+    #   • FCM_CREDENTIALS_JSON — the raw JSON content as a single env var. Best for
+    #     production/Render: the secret lives in the host's env, never in git or on
+    #     disk.
+    #   • FCM_CREDENTIALS_FILE — path to the JSON file. Convenient for local dev
+    #     (gitignored) or with a platform "secret file" mount.
+    FCM_CREDENTIALS_JSON: str = os.getenv("FCM_CREDENTIALS_JSON", "")
+    FCM_CREDENTIALS_FILE: str = os.getenv("FCM_CREDENTIALS_FILE", "")
+    # Optional explicit project id (firebase-admin reads it from the creds file
+    # otherwise; kept for visibility/overrides).
+    FCM_PROJECT_ID: str = os.getenv("FCM_PROJECT_ID", "")
+
+    # How often the delivery sweep claims + sends due reminders.
+    REMINDER_DELIVERY_SECONDS: int = int(os.getenv("REMINDER_DELIVERY_SECONDS", "30"))
+    # Max send attempts before a reminder is marked `failed` (logged, not retried).
+    REMINDER_MAX_ATTEMPTS: int = int(os.getenv("REMINDER_MAX_ATTEMPTS", "5"))
+    # A reminder stuck in `claimed` longer than this (a crashed send) is reclaimed.
+    REMINDER_CLAIM_TIMEOUT_SECONDS: int = int(os.getenv("REMINDER_CLAIM_TIMEOUT_SECONDS", "120"))
+    # How many reminders one sweep tick claims at most.
+    REMINDER_BATCH_LIMIT: int = int(os.getenv("REMINDER_BATCH_LIMIT", "100"))
+    # Default reminder offsets (minutes before due) when the user doesn't specify:
+    # one 10 minutes before and one at the event time.
+    REMINDER_DEFAULT_OFFSETS: str = os.getenv("REMINDER_DEFAULT_OFFSETS", "0,10")
+
     # ── Server ───────────────────────────────────────────────────
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))

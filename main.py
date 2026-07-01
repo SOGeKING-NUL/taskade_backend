@@ -16,7 +16,7 @@ import logging
 import random
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -26,6 +26,8 @@ import services.tasks.task_service as task_service
 import services.memory.profile_service as profile_service
 import services.memory.memory_service as memory_service
 import services.engagement.engagement_service as engagement_service
+import services.devices.device_service as device_service
+import services.reminders.reminder_service as reminder_service
 from services.auth.auth_service import authenticate_websocket, get_current_user_id, profile_fields
 from services.scheduler.scheduler_service import start_scheduler, shutdown_scheduler, get_job_status
 from services.voice.stt_deepgram import DeepgramStreamingSTT
@@ -711,6 +713,8 @@ async def list_tasks(user_id: str = Depends(get_current_user_id)):
     """Return all tasks for the authenticated user, with parent titles, for the UI panel."""
     async with async_session() as session:
         tasks = await task_service.get_tasks(session, user_id, scope="all")
+        # Filter out cancelled/deleted tasks for the user interface views
+        tasks = [t for t in tasks if t.status != "cancelled"]
         out = []
         for t in tasks:
             brief = t.to_brief()
@@ -720,6 +724,19 @@ async def list_tasks(user_id: str = Depends(get_current_user_id)):
                 brief["parent_title"] = parent.title if parent else None
             out.append(brief)
     return {"tasks": out}
+
+
+@app.delete("/tasks/{id}")
+async def delete_task(id: str, user_id: str = Depends(get_current_user_id)):
+    """Soft-delete a task by updating its status to cancelled."""
+    async with async_session() as session:
+        task, _ = await task_service.update_status(
+            session, user_id, id, "cancelled"
+        )
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        await session.commit()
+    return {"ok": True, "id": task.id}
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -743,6 +760,59 @@ async def due_reminders(user_id: str = Depends(get_current_user_id)):
     if due:
         logger.info("Delivered %d due reminder(s) via /reminders/due", len(due))
     return {"count": len(due), "tasks": briefs, "message": message}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  Push notifications — device-token registration + delivery acknowledgement
+# ═════════════════════════════════════════════════════════════════════════
+class DeviceTokenIn(BaseModel):
+    token: str
+    platform: str | None = "android"
+
+
+@app.post("/devices/register")
+async def register_device(
+    body: DeviceTokenIn, user_id: str = Depends(get_current_user_id)
+):
+    """Register (or refresh) the caller's FCM device token so the delivery sweep
+    can push reminders to it. Idempotent by token."""
+    token = body.token.strip()
+    if not token:
+        return {"ok": False, "error": "empty_token"}
+    async with async_session() as session:
+        await device_service.register(session, user_id, token, body.platform or "android")
+        await session.commit()
+    return {"ok": True}
+
+
+@app.post("/devices/unregister")
+async def unregister_device(
+    body: DeviceTokenIn, user_id: str = Depends(get_current_user_id)
+):
+    """Drop a device token (e.g. on logout) so it stops receiving pushes.
+
+    Uses POST (not DELETE-with-path) because FCM tokens contain characters that
+    are awkward to carry safely in a URL path segment.
+    """
+    token = body.token.strip()
+    if not token:
+        return {"ok": False, "error": "empty_token"}
+    async with async_session() as session:
+        removed = await device_service.unregister(session, token)
+        await session.commit()
+    return {"ok": True, "removed": removed}
+
+
+@app.post("/reminders/{reminder_id}/delivered")
+async def reminder_delivered(
+    reminder_id: str, user_id: str = Depends(get_current_user_id)
+):
+    """Mobile acknowledgement that a reminder notification actually surfaced —
+    end-to-end delivery proof (sets `delivered_at`). Scoped to the owner."""
+    async with async_session() as session:
+        ok = await reminder_service.mark_delivered(session, user_id, reminder_id)
+        await session.commit()
+    return {"ok": ok}
 
 
 # ═════════════════════════════════════════════════════════════════════════
