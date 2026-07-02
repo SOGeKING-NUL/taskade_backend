@@ -60,6 +60,23 @@ def profile_fields(claims: dict) -> dict:
     }
 
 
+async def get_current_claims(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> dict:
+    """FastAPI dependency returning the FULL verified token claims.
+
+    Use this (instead of `get_current_user_id`) when an endpoint needs the
+    caller's identity fields — name/email — not just their id, e.g. the
+    login-time profile sync.
+    """
+    if creds is None:
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    try:
+        return decode_token(creds.credentials)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}") from exc
+
+
 async def get_current_user_id(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> str:

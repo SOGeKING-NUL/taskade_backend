@@ -43,6 +43,18 @@ async def init_db() -> None:
         await conn.execute(
             text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS location VARCHAR")
         )
+        # First-run onboarding gate — existing rows backfill to FALSE so they get
+        # onboarded on next app open.
+        await conn.execute(
+            text(
+                "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS "
+                "onboarding_complete BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        )
+        # Once-per-local-day guard for the daily check-in push.
+        await conn.execute(
+            text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS last_checkin_on DATE")
+        )
         # ── Temporal Knowledge Graph patches (Milestone 6) ───────────
         await conn.execute(
             text("ALTER TABLE entity_edges ADD COLUMN IF NOT EXISTS target_date TIMESTAMPTZ")

@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from core.config import settings
@@ -28,10 +29,15 @@ import services.memory.memory_service as memory_service
 import services.engagement.engagement_service as engagement_service
 import services.devices.device_service as device_service
 import services.reminders.reminder_service as reminder_service
-from services.auth.auth_service import authenticate_websocket, get_current_user_id, profile_fields
+from services.auth.auth_service import (
+    authenticate_websocket,
+    get_current_user_id,
+    get_current_claims,
+    profile_fields,
+)
 from services.scheduler.scheduler_service import start_scheduler, shutdown_scheduler, get_job_status
 from services.voice.stt_deepgram import DeepgramStreamingSTT
-from services.voice.tts import SarvamTTS
+from services.voice.tts import SarvamTTS, synthesize_wav
 from services.ai.slm import GroqSLM
 from services.ai.llm import OpenRouterLLM
 
@@ -88,6 +94,12 @@ _RESEARCH_FILLERS = [
     "Sure, let me research that real quick.",
     "One moment while I look into that.",
 ]
+
+# Spoken when every AI provider is unavailable (e.g. all rate-limited) so the
+# user hears a graceful apology instead of the turn dead-ending on a raw error.
+_OVERLOADED_REPLY = (
+    "Sorry, I'm a little overloaded right now. Please give me a moment and try that again."
+)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -358,38 +370,57 @@ async def run_voice_pipeline(
                             "data": metadata,
                         })
 
+            both_unavailable = False
             if fallback_needed:
-                logger.info("SLM tool formatting failed. Escalating to OpenRouterLLM...")
+                logger.info("Primary model unavailable/failed. Escalating to OpenRouterLLM...")
                 llm_service = OpenRouterLLM()
-                async for ev in llm_service.run_conversation(messages, session_context):
-                    if ev["type"] == "text":
-                        await _emit(ev["text"])
-                        sentence_buf += ev["text"]
-                        sentence_buf = await _push_sentences(sentence_buf)
-                    elif ev["type"] == "tool.start":
-                        await _send_json(ws, {"type": "tool.start", "name": ev["name"]})
-                    elif ev["type"] == "tool.result":
-                        await _send_json(ws, {
-                            "type": "tool.result",
-                            "name": ev["name"],
-                            "ok": ev["ok"],
-                            "summary": ev.get("summary", ""),
-                        })
-                        metadata = _extract_presentable_metadata(ev["name"], ev, ev.get("args") or {})
-                        if metadata:
+                try:
+                    async for ev in llm_service.run_conversation(messages, session_context):
+                        if ev.get("type") == "fallback":
+                            # The fallback provider is ALSO unavailable (e.g. both
+                            # rate-limited) — stop and apologize gracefully below.
+                            both_unavailable = True
+                            break
+                        elif ev["type"] == "text":
+                            await _emit(ev["text"])
+                            sentence_buf += ev["text"]
+                            sentence_buf = await _push_sentences(sentence_buf)
+                        elif ev["type"] == "tool.start":
+                            await _send_json(ws, {"type": "tool.start", "name": ev["name"]})
+                        elif ev["type"] == "tool.result":
                             await _send_json(ws, {
-                                "type": "metadata",
-                                "tool": ev["name"],
-                                "data": metadata,
+                                "type": "tool.result",
+                                "name": ev["name"],
+                                "ok": ev["ok"],
+                                "summary": ev.get("summary", ""),
                             })
+                            metadata = _extract_presentable_metadata(ev["name"], ev, ev.get("args") or {})
+                            if metadata:
+                                await _send_json(ws, {
+                                    "type": "metadata",
+                                    "tool": ev["name"],
+                                    "data": metadata,
+                                })
+                except Exception as exc:  # noqa: BLE001 — fallback provider errored out
+                    logger.warning("Fallback model also failed: %s", exc)
+                    both_unavailable = True
 
             # Flush leftover text
             if sentence_buf.strip():
                 await sentence_queue.put(sentence_buf)
 
+            # Both providers unavailable and nothing was said → apologize OUT LOUD
+            # instead of dead-ending the turn with a raw error banner.
+            if both_unavailable and not full_response_parts:
+                await sentence_queue.put(_OVERLOADED_REPLY)
+                await _send_json(ws, {"type": "notice", "message": _OVERLOADED_REPLY})
+
         except Exception as exc:
             logger.error("LLM/SLM streaming error: %s", exc, exc_info=True)
-            await _send_json(ws, {"type": "error", "message": f"AI response failed: {exc}"})
+            # Speak a friendly line rather than surface a raw provider error.
+            if not full_response_parts:
+                await sentence_queue.put(_OVERLOADED_REPLY)
+            await _send_json(ws, {"type": "error", "message": _OVERLOADED_REPLY})
         finally:
             # Signal TTS that no more sentences are coming
             await sentence_queue.put(None)
@@ -661,6 +692,101 @@ async def health_check():
 class LocationIn(BaseModel):
     location: str
     timezone: str | None = None
+
+
+class SessionSyncIn(BaseModel):
+    # Device-provided context (not present in the auth token). Both optional.
+    timezone: str | None = None
+    locale: str | None = None
+
+
+@app.post("/auth/sync")
+async def auth_sync(
+    body: SessionSyncIn, claims: dict = Depends(get_current_claims)
+):
+    """Provision/refresh the user's record at login time.
+
+    The mobile app calls this once right after authenticating (and on app launch
+    when a stored session resumes), so the DB carries the user's identity
+    immediately — not lazily as individual features get used. Name/email are read
+    from the verified token; timezone/locale come from the device.
+    """
+    user_id = claims["sub"]
+    fields = profile_fields(claims)  # {"email": ..., "display_name": ...}
+    async with async_session() as session:
+        profile = await profile_service.sync_identity(
+            session,
+            user_id,
+            display_name=fields.get("display_name"),
+            email=fields.get("email"),
+            timezone=(body.timezone or None),
+            locale=(body.locale or None),
+        )
+        ctx = profile.to_context()
+        await session.commit()
+    logger.info("Session synced for %s", user_id)
+    return {"ok": True, "profile": ctx}
+
+
+class OnboardingIn(BaseModel):
+    display_name: str
+    location: str | None = None
+    timezone: str | None = None
+    daily_checkin_hour: int | None = None
+
+
+@app.post("/profile/onboarding")
+async def complete_onboarding(
+    body: OnboardingIn, user_id: str = Depends(get_current_user_id)
+):
+    """Finalise first-run onboarding with the user's confirmed answers.
+
+    The submitted name is authoritative (it overwrites the OAuth-suggested name),
+    location/timezone/check-in hour are saved when provided, and the profile is
+    marked onboarded so the app stops routing the user here.
+    """
+    name = (body.display_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="display_name is required")
+    hour = body.daily_checkin_hour
+    if hour is not None and not (0 <= hour <= 23):
+        raise HTTPException(status_code=400, detail="daily_checkin_hour must be 0-23")
+
+    async with async_session() as session:
+        profile = await profile_service.complete_onboarding(
+            session,
+            user_id,
+            display_name=name,
+            location=(body.location or None),
+            timezone=(body.timezone or None),
+            daily_checkin_hour=hour,
+        )
+        ctx = profile.to_context()
+        await session.commit()
+    return {"ok": True, "profile": ctx}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  Text-to-speech (one-shot) — DIVYA's voice for scripted prompts (onboarding)
+# ═════════════════════════════════════════════════════════════════════════
+class TtsIn(BaseModel):
+    text: str
+
+
+@app.post("/tts")
+async def tts_say(body: TtsIn, user_id: str = Depends(get_current_user_id)):
+    """Synthesize a short piece of text into a WAV clip in DIVYA's voice.
+
+    Used by the app to speak scripted prompts (onboarding) in the same voice as
+    the live assistant — a one-shot alternative to the streaming voice socket.
+    """
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    wav = await synthesize_wav(text)
+    if not wav:
+        raise HTTPException(status_code=502, detail="TTS synthesis failed")
+    return Response(content=wav, media_type="audio/wav")
 
 
 @app.get("/profile")
