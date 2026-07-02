@@ -64,6 +64,44 @@ def _normalize_offsets(raw) -> list[int]:
     return sorted(out)
 
 
+# Escalating "remind me until it starts" ladder (minutes before due), densest
+# near the deadline. We pick the entries that still fall in the future and cap
+# the count — so a request produces a useful ramp-up, never a spammy stream.
+_RAMP_LADDER = [0, 10, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, 1440]
+
+
+def ramp_up_offsets(
+    due_at: datetime, now: datetime | None = None, max_count: int | None = None
+) -> list[int]:
+    """Build an escalating set of reminder offsets leading up to `due_at`.
+
+    Returns "minutes before due" values that get more frequent near the time
+    (e.g. for a task ~2h out: at-time, 10, 20, 30, 45, 60, 90, 120 min before),
+    keeping only those that fire in the FUTURE and capping the total at
+    `REMINDER_MAX_RAMP`. Nearest-to-deadline entries win under the cap, so the
+    reminders cluster where they matter most.
+    """
+    if max_count is None:
+        max_count = settings.REMINDER_MAX_RAMP
+    due = timez.ensure_aware(due_at)
+    now = now or datetime.now(timezone.utc)
+    if due is None:
+        return [0]
+    minutes_until = (due - now).total_seconds() / 60.0
+
+    # offset 0 (at-time) is always eligible; others only if they land before now.
+    candidates = [o for o in _RAMP_LADDER if o == 0 or o < minutes_until]
+    candidates = sorted(set(candidates))  # ascending = nearest the deadline first
+    if len(candidates) <= max_count:
+        return candidates
+    # Over the cap: keep the densest cluster near the deadline, but reserve the
+    # last slot for the FARTHEST-out reminder — so a far event still gets an early
+    # heads-up instead of total silence until a couple of hours before.
+    near = candidates[: max_count - 1]
+    far = candidates[-1]
+    return sorted(set(near + [far]))
+
+
 def _label_for(offset_minutes: int) -> str:
     if offset_minutes <= 0:
         return "now"

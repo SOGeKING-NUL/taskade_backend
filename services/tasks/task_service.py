@@ -39,6 +39,20 @@ async def ensure_user(
         user = User(id=user_id, display_name=display_name, email=email)
         session.add(user)
         await session.flush()
+    else:
+        # Backfill identity when it's missing — so a row first created by a REST
+        # call (which only knew the user id) gets its name/email filled in as soon
+        # as a caller supplies them (e.g. the login sync). Never clobbers an
+        # existing value with None or with a different one.
+        changed = False
+        if display_name and not user.display_name:
+            user.display_name = display_name
+            changed = True
+        if email and not user.email:
+            user.email = email
+            changed = True
+        if changed:
+            await session.flush()
     return user
 
 
@@ -150,6 +164,7 @@ async def create_task(
     needs_research: bool = False,
     context: dict | None = None,
     reminder_offsets: list[int] | None = None,
+    ramp_up: bool = False,
 ) -> tuple[Task, Task | None]:
     await ensure_user(session, user_id)
 
@@ -182,8 +197,12 @@ async def create_task(
 
     # Generate the reminder ledger rows for this task's due time. No-op when the
     # task has no due_at (fuzzy window / undated), and skips any offset whose
-    # moment is already in the past.
-    await reminder_service.sync_for_task(session, task, reminder_offsets)
+    # moment is already in the past. `ramp_up` overrides the offsets with an
+    # escalating "remind me until it starts" schedule.
+    offsets = reminder_offsets
+    if ramp_up and task.due_at is not None:
+        offsets = reminder_service.ramp_up_offsets(task.due_at)
+    await reminder_service.sync_for_task(session, task, offsets)
     return task, parent_task
 
 
@@ -202,6 +221,7 @@ async def update_task(
     research_summary: str | None = None,
     source_links: list | None = None,
     reminder_offsets: list[int] | None = None,
+    ramp_up: bool = False,
 ) -> Task | None:
     """
     Patch fields on an EXISTING task — distinct from update_status (status-only).
@@ -256,9 +276,13 @@ async def update_task(
 
     # Re-arm reminders only when the due time actually changed (a link/fee/title
     # edit leaves `due_at` None here, so existing — including already-sent —
-    # reminders are left untouched). A new due time regenerates the ledger rows.
+    # reminders are left untouched). A new due time regenerates the ledger rows;
+    # `ramp_up` swaps in an escalating "remind me until it starts" schedule.
     if due_at is not None:
-        await reminder_service.sync_for_task(session, task, reminder_offsets)
+        offsets = reminder_offsets
+        if ramp_up and task.due_at is not None:
+            offsets = reminder_service.ramp_up_offsets(task.due_at)
+        await reminder_service.sync_for_task(session, task, offsets)
     return task
 
 
