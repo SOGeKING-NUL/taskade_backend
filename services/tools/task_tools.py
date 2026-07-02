@@ -100,6 +100,7 @@ async def create_task(args: dict, session_context: dict) -> dict:
             needs_research=bool(args.get("needs_research", False)),
             context=context,
             reminder_offsets=_parse_offsets(args.get("reminder_offsets_minutes")),
+            ramp_up=bool(args.get("remind_until_start", False)),
         )
         await session.commit()
         nested = f" (nested under '{parent.title}')" if parent else ""
@@ -132,6 +133,7 @@ async def update_task(args: dict, session_context: dict) -> dict:
             research_summary=args.get("research_summary"),
             source_links=args.get("source_links"),
             reminder_offsets=_parse_offsets(args.get("reminder_offsets_minutes")),
+            ramp_up=bool(args.get("remind_until_start", False)),
         )
         if task is None:
             return {"ok": False, "error": "task_not_found", "summary": "I couldn't find that task."}

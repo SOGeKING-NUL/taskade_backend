@@ -113,6 +113,9 @@ class Settings:
     # Default reminder offsets (minutes before due) when the user doesn't specify:
     # one 10 minutes before and one at the event time.
     REMINDER_DEFAULT_OFFSETS: str = os.getenv("REMINDER_DEFAULT_OFFSETS", "0,10")
+    # Cap on the number of reminders generated for a "remind me until it starts"
+    # (ramp-up) request — keeps an escalating schedule useful, never spammy.
+    REMINDER_MAX_RAMP: int = int(os.getenv("REMINDER_MAX_RAMP", "8"))
 
     # ── Server ───────────────────────────────────────────────────
     HOST: str = os.getenv("HOST", "0.0.0.0")
