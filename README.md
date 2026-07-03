@@ -1,3 +1,12 @@
+---
+title: Taskade Backend
+emoji: 🚀
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+---
+
 # Voice-First Personal Assistant
 
 A real-time, full-duplex **voice** assistant that goes beyond chat: it understands

@@ -1,5 +1,6 @@
 name: Deploy to Hugging Face Spaces
 
+
 on:
   push:
     branches:
@@ -21,6 +22,7 @@ jobs:
       - name: Sync to Hugging Face Spaces
         env:
           HF_OIDC_RESOURCE: SOGe2020/taskade-backend
+          HF_OIDC_RESOURCE: spaces/SOGe2020/taskade-backend
         run: |
           # Upload current directory contents directly to the Hugging Face Space
           hf upload SOGe2020/taskade-backend . . --repo-type=space
