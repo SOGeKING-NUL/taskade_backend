@@ -21,6 +21,7 @@ jobs:
 
       - name: Sync to Hugging Face Spaces
         env:
+          HF_OIDC_RESOURCE: SOGe2020/taskade-backend
           HF_OIDC_RESOURCE: spaces/SOGe2020/taskade-backend
         run: |
           # Upload current directory contents directly to the Hugging Face Space

@@ -12,7 +12,7 @@ models/user_memory.py) — two distinct stores, not one blob.
 
 from datetime import datetime, date, timezone
 
-from sqlalchemy import String, Integer, Date, DateTime, ForeignKey, JSON
+from sqlalchemy import String, Integer, Boolean, Date, DateTime, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -41,8 +41,15 @@ class UserProfile(Base):
     # Hour-of-day (0-23, in the user's timezone) at which the daily research
     # refresh runs. Null → use the global DAILY_CHECKIN_HOUR default.
     daily_checkin_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # First-run onboarding gate. False until the user completes (or skips) the
+    # onboarding flow that captures their preferred name, location, and check-in
+    # hour. Existing rows default to False so they get onboarded on next open.
+    onboarding_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Guards the daily refresh against running twice in one local day.
     last_refresh_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Guards the daily check-in push against firing twice in one local day.
+    last_checkin_on: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # Misc structured preferences (voice, verbosity, topics of interest, …).
     preferences: Mapped[dict | None] = mapped_column(
@@ -60,5 +67,7 @@ class UserProfile(Base):
             "location": self.location,
             "timezone": self.timezone,
             "locale": self.locale,
+            "daily_checkin_hour": self.daily_checkin_hour,
+            "onboarding_complete": self.onboarding_complete,
             "preferences": self.preferences or {},
         }

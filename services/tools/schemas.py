@@ -71,6 +71,20 @@ TASK_TOOL_DECLARATIONS = [
                             "time' → [0]."
                         ),
                     },
+                    "remind_until_start": {
+                        "type": "boolean",
+                        "description": (
+                            "Set TRUE when the user wants to be reminded REPEATEDLY as "
+                            "the time approaches — 'remind me every 10 minutes until it "
+                            "starts', 'keep reminding me', 'don't let me miss it', 'nag "
+                            "me until then'. This creates an ESCALATING set of reminders "
+                            "that get more frequent near the time (capped so it's never "
+                            "spammy). Use this INSTEAD of reminder_offsets_minutes, and "
+                            "create ONE task — never multiple tasks or many reminders by "
+                            "hand. Confirm the cadence naturally, e.g. 'I'll remind you as "
+                            "it gets closer, more often near the start.'"
+                        ),
+                    },
                     "window_start": {
                         "type": "string",
                         "description": (
@@ -226,6 +240,15 @@ TASK_TOOL_DECLARATIONS = [
                             "Optional — only when also changing due_at AND the user "
                             "wants specific lead times. Minutes before due_at; 0 = at the "
                             "time. Defaults to [0, 10] when omitted."
+                        ),
+                    },
+                    "remind_until_start": {
+                        "type": "boolean",
+                        "description": (
+                            "Set TRUE (with a due_at) to switch this task to an escalating "
+                            "'remind me until it starts' schedule — reminders that get more "
+                            "frequent near the time. Use when the user asks to be reminded "
+                            "repeatedly/until it begins."
                         ),
                     },
                     "window_start": {"type": "string", "description": "Optional new fuzzy-window start."},

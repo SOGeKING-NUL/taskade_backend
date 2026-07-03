@@ -36,6 +36,7 @@ from services.research.refresh_service import refresh_watched_tasks
 import services.memory.reflection_service as reflection_service
 import services.reminders.reminder_service as reminder_service
 import services.devices.device_service as device_service
+import services.engagement.checkin_service as checkin_service
 from services.push import push_service
 from models.task import Task
 from models.reminder import Reminder
@@ -206,6 +207,61 @@ async def daily_task_refresh() -> None:
         await _refresh_one_user(user_id)
 
 
+async def _checkin_one_user(user_id: str) -> None:
+    """
+    Per-user daily check-in push — this runs hourly for every user, but each user
+    only actually receives a check-in once a day at THEIR configured local
+    check-in hour (the same hour that drives the research refresh).
+
+    Composes a time-of-day-aware summary (today vs tomorrow + overdue) and pushes
+    it via FCM. Marked once-per-local-day via `last_checkin_on`. Skips silently
+    when there's nothing to say, no device is registered, or FCM isn't configured.
+    """
+    async with async_session() as session:
+        profile = await profile_service.ensure_profile(session, user_id)
+        hour = profile_service.checkin_hour(profile)
+        local = _local_now(profile.timezone)
+        already = profile.last_checkin_on == local.date()
+        await session.commit()
+
+    if local.hour != hour or already:
+        return
+
+    # Build the message + gather device tokens.
+    async with async_session() as session:
+        profile = await profile_service.ensure_profile(session, user_id)
+        content = await checkin_service.build_checkin(session, user_id, profile)
+        tokens = await device_service.tokens_for(session, user_id)
+        await session.commit()
+
+    if content and tokens and push_service.is_configured():
+        title, body = content
+        result = await push_service.send_reminder(
+            tokens, title=title, body=body, data={"type": "daily_checkin"}
+        )
+        if result.prune_tokens:
+            async with async_session() as session:
+                for dead in result.prune_tokens:
+                    await device_service.prune(session, dead)
+                await session.commit()
+        logger.info("Daily check-in delivered=%d for %s", result.success_count, user_id)
+
+    # Mark processed for the day regardless of whether we sent, so we evaluate the
+    # check-in exactly once per local day.
+    async with async_session() as session:
+        await profile_service.mark_checked_in(session, user_id, local.date())
+        await session.commit()
+
+
+async def daily_checkin_sweep() -> None:
+    """Fan out the per-user daily check-in across every known user."""
+    for user_id in await _all_user_ids():
+        try:
+            await _checkin_one_user(user_id)
+        except Exception as exc:  # noqa: BLE001 — one user's failure mustn't stop the rest
+            logger.warning("Daily check-in failed for %s: %s", user_id, exc)
+
+
 async def daily_reflection_sweep() -> None:
     """Run reflection sweeps for all users.
 
@@ -270,6 +326,19 @@ def start_scheduler() -> AsyncIOScheduler:
         trigger="cron",
         minute=0,
         id="daily_task_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    # Daily check-in push — fires hourly, self-gates to each user's local
+    # check-in hour, sends a time-of-day-aware summary (restart-safe via
+    # last_checkin_on). No-op until FCM is configured.
+    _scheduler.add_job(
+        daily_checkin_sweep,
+        trigger="cron",
+        minute=0,
+        id="daily_checkin_sweep",
         replace_existing=True,
         coalesce=True,
         max_instances=1,

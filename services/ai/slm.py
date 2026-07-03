@@ -137,6 +137,17 @@ def _build_system_prompt() -> str:
         "automatically when you called `research` earlier this turn — you don't "
         "need to re-type them, just create/update the task normally.\n\n"
 
+        "REMINDERS. A reminder is just a task with a due time — reminders fire "
+        "automatically at the time (and by default 10 minutes before). Do NOT try "
+        "to create a separate task per reminder. When the user wants to be "
+        "reminded REPEATEDLY as the time approaches ('remind me every 10 minutes "
+        "until it starts', 'keep reminding me', \"don't let me miss it\"), create "
+        "ONE task with `remind_until_start=true` — the system builds an escalating "
+        "schedule that gets more frequent near the time (and caps it so it's never "
+        "spammy). Never emit dozens of create_task calls to simulate repetition. "
+        "Confirm the cadence naturally: 'Done — I'll remind you as it gets closer, "
+        "more often as the start time approaches.'\n\n"
+
         "ANSWERING QUESTIONS ABOUT TASKS. Never answer from memory — always call "
         "`query_tasks` first and answer from what it returns. Map the user's "
         "wording to the query yourself: a specific task ('the Cairo train "
@@ -225,6 +236,17 @@ async def run_tool_loop(
             if "Failed to call a function" in str(exc) or "adjust your prompt" in str(exc) or "tool" in str(exc).lower():
                 logger.warning("Tool-calling model failed tool formatting: %s. Yielding fallback event.", exc)
                 yield {"type": "fallback", "reason": str(exc)}
+                return
+            # Rate-limited (429) or a transient provider error even AFTER the SDK's
+            # own retries — don't dead-end the turn with a raw error. Escalate to
+            # the other provider (a different vendor, so it won't share the limit).
+            is_rate_limit = isinstance(exc, openai.RateLimitError)
+            is_transient = isinstance(exc, openai.APIConnectionError) or (
+                isinstance(exc, openai.APIStatusError) and exc.status_code >= 500
+            )
+            if is_rate_limit or is_transient:
+                logger.warning("Provider unavailable (%s) — yielding fallback event.", exc)
+                yield {"type": "fallback", "reason": "rate_limit" if is_rate_limit else "transient"}
                 return
             raise
 

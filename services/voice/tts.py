@@ -59,6 +59,38 @@ def _strip_wav_header(wav_bytes: bytes) -> bytes:
     return wav_bytes
 
 
+async def synthesize_wav(text: str) -> bytes:
+    """One-shot synthesis: turn a short piece of text into a complete WAV file in
+    DIVYA's configured voice.
+
+    Used by the REST `/tts` endpoint (e.g. onboarding prompts) — distinct from the
+    streaming `stream_tts` used on the live voice turn. Opens a dedicated Sarvam
+    connection, collects every PCM chunk, wraps it in a WAV header at the
+    configured sample rate, and closes. Returns b"" if nothing was synthesized.
+    """
+    from utils.audio import pcm16_to_wav
+
+    text = (text or "").strip()
+    if not text:
+        return b""
+
+    async def _one():
+        yield text
+
+    tts = SarvamTTS()
+    pcm = bytearray()
+    try:
+        await tts.connect()
+        async for chunk in tts.stream_tts(_one()):
+            pcm.extend(chunk)
+    finally:
+        await tts.close()
+
+    if not pcm:
+        return b""
+    return pcm16_to_wav(bytes(pcm), sample_rate=settings.SARVAM_TTS_SAMPLE_RATE, channels=1)
+
+
 class SarvamTTS:
     """Stream text → speech via the Sarvam Bulbul WebSocket API."""
 
