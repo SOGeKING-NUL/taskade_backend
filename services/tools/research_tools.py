@@ -21,8 +21,15 @@ async def research(args: dict, session_context: dict) -> dict:
     if not query:
         return {"ok": False, "error": "missing_query", "summary": "I need something to research."}
 
+    # Deterministically hand the user's known location to the research model as
+    # context, rather than relying on the brain remembering to type it into the
+    # query text — that's the failure mode that produced Sydney/Michigan results
+    # for a user based elsewhere. The research model itself judges relevance
+    # (some queries aren't location-dependent).
+    location = ((session_context.get("profile") or {}).get("location") or "").strip() or None
+
     try:
-        result = await _service.research(query)
+        result = await _service.research(query, location=location)
     except Exception as exc:  # noqa: BLE001
         logger.exception("research tool failed")
         return {"ok": False, "error": str(exc), "summary": "I couldn't complete that research."}

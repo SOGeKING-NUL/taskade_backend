@@ -25,27 +25,41 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 _RESEARCH_SYSTEM_PROMPT_BASE = (
-    "You are a research assistant with live web access. Answer the query factually "
-    "and concisely using current information. Focus on concrete, actionable facts: "
-    "key dates and deadlines, required steps, costs, and official links. Reply in "
-    "3-6 sentences. When a concrete date is known, state it explicitly (e.g. "
-    "'registration closes on 15 July 2026'). Do not speculate — if something is "
-    "uncertain or you couldn't verify it, say so plainly."
+    "You are a research assistant feeding a VOICE assistant — your output may be "
+    "spoken aloud verbatim, so it must already read as plain natural prose. Answer "
+    "the query factually and concisely using current information. Focus on concrete, "
+    "actionable facts: key dates and deadlines, required steps, costs, and official "
+    "links. Reply in 3-6 plain sentences, comma-separated where you'd naturally "
+    "list a few items — NEVER markdown: no headers, no bullet points, no numbered "
+    "lists, no bold/italic asterisks or underscores, no tables. If you're covering "
+    "multiple items (e.g. several events), pick the 2-3 most relevant ones and "
+    "describe them in flowing sentences, not a list. When a concrete date is known, "
+    "state it explicitly (e.g. 'registration closes on 15 July 2026'). Do not "
+    "speculate — if something is uncertain or you couldn't verify it, say so plainly."
 )
 
 
-def _system_prompt() -> str:
+def _system_prompt(location: str | None = None) -> str:
     # Computed per-call (not at import time) so it never goes stale on a
     # long-running process, and so the model anchors recurring-event queries
     # (e.g. "the December JLPT") to the real current date instead of whatever
     # date its training data made salient.
     today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
-    return (
+    parts = [
         f"Today's date is {today}. Resolve any relative or recurring-event date "
         "reference against THIS date, not against your training data — your "
         "training data is stale and will bias you toward a past occurrence of "
-        "the event.\n\n" + _RESEARCH_SYSTEM_PROMPT_BASE
-    )
+        "the event."
+    ]
+    if location:
+        parts.append(
+            f"The user is based in {location}. If the query concerns something "
+            "location-dependent (events, registration, prices, local deadlines) and "
+            "doesn't already name a place, prioritize results relevant to this "
+            "location over ones elsewhere. Ignore this if the query is not "
+            "location-dependent (e.g. a general fact)."
+        )
+    return "\n\n".join(parts) + "\n\n" + _RESEARCH_SYSTEM_PROMPT_BASE
 
 
 def _extract_links(resp, msg) -> list[dict]:
@@ -95,11 +109,11 @@ class ResearchService:
         self.model = settings.OPENROUTER_RESEARCH_MODEL
         logger.info("Research service initialised  model=%s", self.model)
 
-    async def research(self, query: str) -> dict:
+    async def research(self, query: str, location: str | None = None) -> dict:
         resp = await self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": _system_prompt()},
+                {"role": "system", "content": _system_prompt(location)},
                 {"role": "user", "content": query},
             ],
             temperature=0.2,

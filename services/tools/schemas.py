@@ -1,38 +1,10 @@
 """
-Tool/function-call declarations in OpenAI `tools=[...]` format.
-
-Two distinct tool sets:
-  • ESCALATE_TOOL        — the single tool the fast SLM (Groq) may call to hand
-                           a turn off to the tool-calling LLM.
-  • TASK_TOOL_DECLARATIONS — the real action tools the LLM (OpenRouter) can call.
-                           (`research` is added in Milestone 3.)
+Tool/function-call declarations in OpenAI `tools=[...]` format — the action
+tools the brain (Gemini) can call. `research` reaches out to OpenRouter under
+the hood; everything else runs against our own DB.
 """
 
-# ── SLM routing tool ─────────────────────────────────────────────────────
-ESCALATE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "escalate_to_assistant",
-        "description": (
-            "Hand off to the advanced assistant ONLY when the user wants to "
-            "create, update, complete, or list/look up a task or reminder. "
-            "Do NOT call this for greetings, casual chat, or general/factual "
-            "questions — answer those yourself directly."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "intent_summary": {
-                    "type": "string",
-                    "description": "One sentence describing exactly what the user wants done.",
-                },
-            },
-            "required": ["intent_summary"],
-        },
-    },
-}
-
-# ── LLM action tools ─────────────────────────────────────────────────────
+# ── Action tools ─────────────────────────────────────────────────────────
 TASK_TOOL_DECLARATIONS = [
     {
         "type": "function",
@@ -129,6 +101,18 @@ TASK_TOOL_DECLARATIONS = [
                             "remind this, or said yes to your offer. FALSE if you are only "
                             "inferring it would help — when FALSE the task is NOT created and "
                             "you must ask the user to confirm first. Never default to TRUE."
+                        ),
+                    },
+                    "auto_archive_after_hours": {
+                        "type": "integer",
+                        "description": (
+                            "For SHORT-LIVED, throwaway reminders ('get eggs tomorrow', "
+                            "'call mom tonight'), set this to how many hours after the due "
+                            "time the reminder should auto-clear if not done — e.g. 24. This "
+                            "keeps trivial one-off reminders from lingering forever. For "
+                            "lasting goals or anything worked toward over time ('train for "
+                            "the marathon', 'register for the exam'), OMIT it so the task "
+                            "persists."
                         ),
                     },
                     "research_summary": {

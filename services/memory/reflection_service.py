@@ -32,9 +32,10 @@ from models.reflection import Reflection, MoodSignal
 
 logger = logging.getLogger(__name__)
 
+# OpenRouter (not the hot-path Gemini brain) handles all background LLM work.
 _client = AsyncOpenAI(
-    api_key=settings.GROQ_API_KEY,
-    base_url=settings.GROQ_BASE_URL,
+    api_key=settings.OPENROUTER_API_KEY,
+    base_url=settings.OPENROUTER_BASE_URL,
     timeout=30.0,
     max_retries=2,
 )
@@ -176,7 +177,7 @@ async def run_sweep(user_id: str, sweep_type: str = "daily") -> int:
 
     try:
         resp = await _client.chat.completions.create(
-            model=settings.SLM_MODEL,
+            model=settings.OPENROUTER_LLM_MODEL,
             messages=[
                 {"role": "system", "content": _REFLECTION_PROMPT},
                 {"role": "user", "content": prompt},

@@ -1,127 +1,155 @@
 """
-Memory service — free-form durable facts (`remember` / `recall`).
+Memory service — semantic/factual long-term memory, backed by mem0.
 
-Interface contract (kept deliberately backend-agnostic so a future swap to
-Mem0/pgvector vector search touches only this file):
+This replaces the previous hand-rolled stack (flat UserMemory keyword recall +
+temporal knowledge graph + reflections). mem0 gives us what that sprawl was
+approximating but couldn't do well: vector (semantic) search, automatic
+extraction of durable facts from a conversation, and de-duplication — all in a
+library call instead of ~700 lines of custom extraction we had to maintain.
 
-    recall(session, user_id, limit)  -> list[str]   # fast DB read, hot path
-    remember(user_id, user_text, assistant_text)    # fire-and-forget, own session
+What lives WHERE now (the memory taxonomy):
+  • Semantic / factual / procedural LTM  → HERE (mem0, vector store in Postgres).
+    Stable facts about the user: "based in Pune", "studies best in the morning",
+    "prefers concise answers".
+  • Episodic memory (events the user experienced) → the `tasks` table. A done
+    task IS an episode ("ran the Tuffman half marathon"); a dated task is an
+    upcoming one. No separate episodic store is needed.
+  • Working memory (STM) → the bounded conversation history in the prompt.
 
-`remember` runs two extraction passes in parallel:
-  1. The original flat-fact extraction (UserMemory rows — backward compat).
-  2. The new graph extraction (entities + temporal edges + mood signals).
-
-Both are fire-and-forget.  The graph path will eventually replace the flat
-path once trust is established; for now both run side-by-side.
+Backend: Gemini for both extraction LLM and embeddings (free tier), pgvector in
+the same Supabase Postgres. Kept behind this thin module so the rest of the app
+calls `remember()` / `recall()` and never sees mem0 directly.
 """
 
-import json
+import asyncio
 import logging
-
-from openai import AsyncOpenAI
+from urllib.parse import urlparse, unquote
 
 from core.config import settings
-from db.session import async_session
-from models.user_memory import UserMemory
-from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
-# Shared client (OpenRouter is OpenAI-compatible). Reused across calls.
-_client = AsyncOpenAI(
-    api_key=settings.OPENROUTER_API_KEY,
-    base_url=settings.OPENROUTER_BASE_URL,
-    timeout=30.0,
-    max_retries=2,
-)
+# ── mem0 config (Gemini LLM + Gemini embedder + pgvector) ─────────────────
+def _pg_conn_string() -> str:
+    """Build a libpq KEYWORD-format DSN from the app's async DATABASE_URL.
 
-_EXTRACT_SYSTEM_PROMPT = (
-    "You extract durable personal facts about the user from a single exchange "
-    "in a voice assistant. Return ONLY long-lived facts, stable preferences, or "
-    "goals worth remembering across future conversations — NOT one-off requests, "
-    "task details (those are stored separately), pleasantries, or transient "
-    "context. Examples worth keeping: 'is preparing for the JLPT N5 exam', "
-    "'prefers concise answers', 'studies best in the early morning', 'is based "
-    "in Pune'. \n\n"
-    "Reply with a JSON object: {\"memories\": [{\"content\": str, \"kind\": "
-    "\"preference\"|\"fact\"|\"goal\"}]}. Use an empty list if nothing is worth "
-    "remembering. Keep each `content` a short third-person statement."
-)
+    We deliberately do NOT hand mem0 individual host/user/password fields: its
+    pgvector backend then assembles a `postgresql://{user}:{password}@{host}` URI,
+    and any '@' (or other reserved char) in the password — ours has one — corrupts
+    that URI so the host is misparsed. Keyword format quotes each value instead, so
+    special characters are safe. mem0 uses a supplied connection_string as-is."""
+    u = urlparse(settings.DATABASE_URL.replace("+asyncpg", ""))
 
+    def q(v: str) -> str:  # libpq keyword-value quoting
+        return "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
-async def recall(session, user_id: str, limit: int | None = None) -> list[str]:
-    """Return recent remembered facts for the user (fast, no LLM)."""
-    limit = limit or settings.MEMORY_RECALL_LIMIT
-    rows = (
-        await session.execute(
-            select(UserMemory)
-            .where(UserMemory.user_id == user_id)
-            .order_by(UserMemory.created_at.desc())
-            .limit(limit)
-        )
-    ).scalars().all()
-    return [r.content for r in rows]
+    return " ".join([
+        f"host={u.hostname}",
+        f"port={u.port or 5432}",
+        f"dbname={(u.path or '/postgres').lstrip('/') or 'postgres'}",
+        f"user={q(unquote(u.username or ''))}",
+        f"password={q(unquote(u.password or ''))}",
+    ])
 
 
-async def _flat_remember(user_id: str, user_text: str, assistant_text: str) -> None:
-    """Original flat-fact extraction (backward compat, will be retired)."""
-    exchange = f"User: {user_text}\nAssistant: {assistant_text}"
+def _mem0_config() -> dict:
+    key = settings.GOOGLE_API_KEY
+    return {
+        "llm": {
+            # Memory extraction runs on OpenRouter (gpt-4o-mini), NOT the hot-path
+            # Gemini brain: (1) it matches the project's provider split (brain=Gemini,
+            # all background work=OpenRouter), and (2) Gemini's free tier throws
+            # frequent 503s that were silently dropping memory writes. mem0's "openai"
+            # provider auto-routes to OpenRouter when OPENROUTER_API_KEY is in the
+            # environment (core.config's load_dotenv puts it there).
+            "provider": "openai",
+            "config": {"model": settings.OPENROUTER_LLM_MODEL, "temperature": 0.1},
+        },
+        "embedder": {
+            "provider": "gemini",
+            # gemini-embedding-001 forced to 768 dims (its default is 3072). The
+            # older text-embedding-004 404s for newer Gemini projects. 768 must
+            # match `embedding_model_dims` in the vector_store below.
+            "config": {
+                "model": "models/gemini-embedding-001",
+                "api_key": key,
+                "embedding_dims": 768,
+            },
+        },
+        "vector_store": {
+            "provider": "pgvector",
+            "config": {
+                "connection_string": _pg_conn_string(),
+                # NOT "user_memories" — that's the legacy flat-facts table
+                # (models/user_memory.py), which has no vector column. mem0 needs
+                # its own table or it queries a vector op on the wrong schema.
+                "collection_name": "mem0_memories",
+                "embedding_model_dims": 768,
+            },
+        },
+    }
+
+
+# Lazily-built singleton. Construction creates clients + the pgvector collection
+# table (one-time blocking DB work), so we build it in a worker thread the first
+# time and reuse it. `AsyncMemory` construction is sync; its add/search are async.
+_memory = None
+_build_lock = asyncio.Lock()
+
+
+async def _get_memory():
+    global _memory
+    if _memory is None:
+        async with _build_lock:
+            if _memory is None:
+                from mem0 import AsyncMemory
+                _memory = await asyncio.to_thread(AsyncMemory.from_config, _mem0_config())
+                logger.info("mem0 memory store initialised (gemini + pgvector)")
+    return _memory
+
+
+def _memories(raw) -> list[str]:
+    """mem0 returns either {'results': [...]} or a bare list depending on version."""
+    items = raw.get("results", []) if isinstance(raw, dict) else (raw or [])
+    return [m.get("memory", "") for m in items if isinstance(m, dict) and m.get("memory")]
+
+
+async def recall(user_id: str, query: str = "", limit: int = 5) -> list[str]:
+    """Return the most relevant durable facts for the user.
+
+    With a `query` (the current utterance) → semantic search: the facts most
+    related to what the user is talking about right now. Without one → the most
+    recent facts (e.g. for building a greeting). Fast, hot-path safe; swallows
+    its own errors so a memory hiccup never breaks a turn.
+    """
     try:
-        resp = await _client.chat.completions.create(
-            model=settings.OPENROUTER_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": _EXTRACT_SYSTEM_PROMPT},
-                {"role": "user", "content": exchange},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-        )
-        payload = json.loads(resp.choices[0].message.content or "{}")
-        candidates = payload.get("memories", []) or []
+        mem = await _get_memory()
+        filters = {"user_id": user_id}
+        if query:
+            raw = await mem.search(query=query, filters=filters, top_k=limit)
+        else:
+            raw = await mem.get_all(filters=filters, top_k=limit)
+        return _memories(raw)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("flat memory extraction failed: %s", exc)
-        return
-
-    if not candidates:
-        return
-
-    async with async_session() as session:
-        existing = {c.lower() for c in await recall(session, user_id, limit=200)}
-        added = 0
-        for m in candidates:
-            content = (m.get("content") or "").strip()
-            if not content or content.lower() in existing:
-                continue
-            session.add(
-                UserMemory(user_id=user_id, content=content, kind=m.get("kind", "fact"))
-            )
-            existing.add(content.lower())
-            added += 1
-        if added:
-            await session.commit()
-            logger.info("remembered %d new flat fact(s) for %s", added, user_id)
+        logger.warning("memory recall failed: %s", exc)
+        return []
 
 
 async def remember(user_id: str, user_text: str, assistant_text: str) -> None:
     """Extract + store durable facts from one exchange. Fire-and-forget.
 
-    Runs both the legacy flat-fact extraction AND the new graph extraction in
-    parallel.  Each is independently error-safe.
+    mem0 decides what (if anything) is worth keeping and de-duplicates against
+    what's already stored — so unlike the old flat store, repeating "I'm in Pune"
+    doesn't pile up duplicate rows.
     """
-    # Import here to avoid circular imports at module level.
-    from services.memory.graph_service import extract_and_store
-
-    # Flat facts (backward compat — will be retired once graph is trusted).
+    if not (user_text or assistant_text):
+        return
     try:
-        await _flat_remember(user_id, user_text, assistant_text)
+        mem = await _get_memory()
+        messages = [
+            {"role": "user", "content": user_text or ""},
+            {"role": "assistant", "content": assistant_text or ""},
+        ]
+        await mem.add(messages, user_id=user_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("flat remember failed: %s", exc)
-
-    # Graph extraction (new path).
-    try:
-        edges = await extract_and_store(user_id, user_text, assistant_text)
-        if edges:
-            logger.info("graph remember: %d edge(s) for %s", edges, user_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("graph remember failed: %s", exc)
-
+        logger.warning("memory remember failed: %s", exc)

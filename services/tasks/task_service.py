@@ -7,7 +7,7 @@ session and calls into here, so this logic stays independently testable.
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -150,6 +150,7 @@ async def create_task(
     needs_research: bool = False,
     context: dict | None = None,
     reminder_offsets: list[int] | None = None,
+    auto_archive_after_hours: int | None = None,
 ) -> tuple[Task, Task | None]:
     await ensure_user(session, user_id)
 
@@ -170,6 +171,7 @@ async def create_task(
         window_end=window_end,
         requires_research=needs_research,
         context=context,
+        auto_archive_after_hours=auto_archive_after_hours,
     )
     session.add(task)
 
@@ -365,6 +367,49 @@ async def update_status(
 
     logger.info("update_status → %s = %s (unblocked %d)", task.title, new_status, len(unblocked))
     return task, unblocked
+
+
+def _ttl_expired(due_at: datetime | None, ttl_hours: int | None, now: datetime) -> bool:
+    """True when an ephemeral task is past `due_at + ttl_hours`. False when it has
+    no TTL or no due date (lasting tasks never expire this way)."""
+    if ttl_hours is None or due_at is None:
+        return False
+    return _aware(due_at) + timedelta(hours=ttl_hours) < now
+
+
+async def archive_expired_ephemeral_tasks(session: AsyncSession) -> int:
+    """Auto-cancel short-lived reminders left undone past `due_at + TTL`.
+
+    Only touches tasks that opted in with `auto_archive_after_hours` (ephemeral
+    "get eggs tomorrow" reminders); lasting goals (NULL TTL) are never affected.
+    This is the STM side of the memory model — trivial reminders fade instead of
+    lingering as permanent overdue clutter. Caller commits.
+
+    Returns the number archived.
+    # ponytail: per-row loop over the (tiny) opted-in set; a set-based UPDATE with
+    # make_interval would be fewer queries if this ever grows large.
+    """
+    now = datetime.now(timezone.utc)
+    rows = (
+        await session.execute(
+            select(Task).where(
+                Task.auto_archive_after_hours.is_not(None),
+                Task.status.in_(("pending", "blocked", "active")),
+                Task.due_at.is_not(None),
+            )
+        )
+    ).scalars().all()
+
+    archived = 0
+    for t in rows:
+        if _ttl_expired(t.due_at, t.auto_archive_after_hours, now):
+            t.status = "cancelled"
+            await reminder_service.cancel_for_task(session, t.id)
+            archived += 1
+    if archived:
+        await session.flush()
+        logger.info("archived %d expired ephemeral task(s)", archived)
+    return archived
 
 
 async def get_due_reminders(session: AsyncSession, user_id: str) -> list[Task]:

@@ -206,6 +206,16 @@ async def daily_task_refresh() -> None:
         await _refresh_one_user(user_id)
 
 
+async def archive_expired_tasks() -> None:
+    """Hourly: auto-cancel ephemeral reminders left undone past their TTL, across
+    all users in one pass (STM reminders fade; lasting goals persist)."""
+    async with async_session() as session:
+        n = await task_service.archive_expired_ephemeral_tasks(session)
+        await session.commit()
+    if n:
+        logger.info("Archived %d expired ephemeral task(s)", n)
+
+
 async def daily_reflection_sweep() -> None:
     """Run reflection sweeps for all users.
 
@@ -283,6 +293,17 @@ def start_scheduler() -> AsyncIOScheduler:
         hour=7,
         minute=0,
         id="daily_reflection_sweep",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    # Hourly cleanup — auto-cancel ephemeral reminders left undone past their TTL.
+    _scheduler.add_job(
+        archive_expired_tasks,
+        trigger="cron",
+        minute=30,
+        id="archive_expired_tasks",
         replace_existing=True,
         coalesce=True,
         max_instances=1,

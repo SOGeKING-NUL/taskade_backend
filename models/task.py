@@ -62,6 +62,14 @@ class Task(Base):
     completion_condition: Mapped[str] = mapped_column(String, default="manual_confirm")
     requires_research: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # STM vs LTM lifecycle. Set (e.g. 24) for short-lived, throwaway reminders
+    # ("get eggs tomorrow") — the scheduler auto-cancels them this many hours past
+    # due if still not done, so trivial reminders fade instead of piling up as
+    # permanent overdue clutter. NULL for lasting goals ("train for the marathon"),
+    # which persist. Episodic long-term memory is the tasks table itself; this just
+    # controls how long an ephemeral one lingers.
+    auto_archive_after_hours: Mapped[int | None] = mapped_column(nullable=True)
+
     # Freeform structured data (research output, portal links, etc.).
     # JSONB on Postgres, JSON elsewhere (for portability/testing).
     context: Mapped[dict | None] = mapped_column(

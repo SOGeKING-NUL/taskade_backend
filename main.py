@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -32,8 +33,7 @@ from services.auth.auth_service import authenticate_websocket, get_current_user_
 from services.scheduler.scheduler_service import start_scheduler, shutdown_scheduler, get_job_status
 from services.voice.stt_deepgram import DeepgramStreamingSTT
 from services.voice.tts import SarvamTTS
-from services.ai.slm import GroqSLM
-from services.ai.llm import OpenRouterLLM
+from services.ai.brain import GeminiBrain
 
 # ── Logging ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -64,13 +64,32 @@ app.add_middleware(
 )
 
 # ── Global services (stateless, shared across connections) ───────────────
-# Single brain: the Groq SLM answers, reasons, and calls the tools itself
-# (create_task / query_tasks / update_task_status / research). `research` is the
-# only tool that reaches out to OpenRouter (web search) under the hood.
-slm_service = GroqSLM()
+# Single brain: Gemini answers, reasons, and calls the tools itself
+# (create_task / query_tasks / update_task / update_task_status / research /
+# update_profile). `research` is the only tool that reaches out to OpenRouter
+# (GPT-4o-mini web search) under the hood.
+brain_service = GeminiBrain()
 
 # ── Sentence-boundary characters ────────────────────────────────────────
-_SENTENCE_ENDERS = frozenset(".!?।;:")
+# Deliberately NOT ":"/";" — a colon after a markdown-style header/list line (e.g.
+# "**August 2026:**", stray even with the no-markdown prompt rules) would end a
+# "sentence" right there, flushing a garbage fragment to TTS as its own utterance.
+# That produced the audible "ticking" bug: dozens of tiny flushes back to back.
+_SENTENCE_ENDERS = frozenset(".!?।")
+
+# Strips markdown syntax before text reaches TTS (spoken audio must never contain
+# "**"/"#"/bullet markers — Sarvam vocalizes them as noise/clicks). Applied ONLY to
+# the copy sent to TTS; the on-screen transcript keeps markdown so it still renders
+# nicely in the client's message bubbles.
+_MARKDOWN_STRIP_RE = re.compile(r"\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|_(.+?)_|`(.+?)`")
+_MARKDOWN_LINE_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+\.)[ \t]+|^#{1,6}[ \t]+", re.MULTILINE)
+
+
+def _for_speech(text: str) -> str:
+    """Strip markdown emphasis/list/header syntax so TTS never has to vocalize it."""
+    text = _MARKDOWN_LINE_RE.sub("", text)
+    text = _MARKDOWN_STRIP_RE.sub(lambda m: next(g for g in m.groups() if g is not None), text)
+    return re.sub(r"\s+", " ", text).strip()
 
 # Keep the in-memory chat prompt bounded on long sessions (messages, not turns).
 _MAX_HISTORY_MESSAGES = 20
@@ -141,20 +160,20 @@ def _extract_presentable_metadata(tool_name: str, result: dict, args: dict) -> d
 
 async def _memory_context(session_context: dict, transcript: str) -> str:
     """
-    Build a short system block of what we know about the user (Milestone 5+6),
-    injected into the SLM's prompt each turn — so `research` / `create_task` run
-    with the user's known prefs/facts in view.
+    Build a short system block of what we know about the user, injected into the
+    brain's prompt each turn — so `research` / `create_task` run with the user's
+    known prefs/facts in view.
 
-    Pulls from five sources:
+    Pulls from three sources (deliberately small — a big memory block is what
+    bloated the prompt and tripped rate limits before):
       1. Profile fields (from session context, loaded at connect time).
-      2. Flat recalled facts (backward-compat UserMemory rows).
-      3. Active knowledge-graph edges (temporal graph).
-      4. Recent reflections + mood signals (state-delta insights).
-      5. Tasks deterministically matched against THIS turn's transcript — so a
+      2. Semantic memory: mem0 vector search keyed on THIS turn's transcript, so
+         the facts injected are the ones actually relevant to what the user is
+         talking about now — not every fact we've ever stored.
+      3. Tasks deterministically matched against THIS turn's transcript — so a
          task's stored research/links are already in front of the model before
-         it ever decides whether to call `research` or `query_tasks`. This is
-         a fixed DB lookup, not a model judgment call, so it can't be skipped
-         by a routing mistake the way a tool choice can.
+         it ever decides whether to call `research` or `query_tasks`. A fixed DB
+         lookup, not a model judgment, so a routing mistake can't skip it.
     """
     user_id = session_context["user_id"]
     profile = session_context.get("profile") or {}
@@ -171,44 +190,14 @@ async def _memory_context(session_context: dict, transcript: str) -> str:
         lines.append(f"Preferences: {prefs}.")
 
     try:
+        # Semantic memory (mem0) — top facts relevant to what was just said.
+        facts = await memory_service.recall(user_id, query=transcript, limit=5)
+        if facts:
+            lines.append("Relevant facts about the user:")
+            lines += [f"- {f}" for f in facts]
+
         async with async_session() as session:
-            # Legacy flat facts.
-            facts = await memory_service.recall(session, user_id)
-            if facts:
-                lines.append("Remembered facts about the user:")
-                lines += [f"- {f}" for f in facts]
-
-            # ── Temporal Knowledge Graph context ─────────────────────
-            from services.memory import graph_service, reflection_service
-
-            edges = await graph_service.get_active_edges(session, user_id, limit=20)
-            if edges:
-                names = await graph_service.get_entity_name_map(session, user_id)
-                lines.append("Knowledge graph (active relationships):")
-                for edge in edges:
-                    src = names.get(edge.source_id, "?")
-                    tgt = names.get(edge.target_id, "?")
-                    target_info = ""
-                    if edge.target_date:
-                        target_info = f" (target: {edge.target_date.strftime('%b %d, %Y')})"
-                    lines.append(f"- {src} → {edge.relation} → {tgt}{target_info}")
-
-            reflections = await reflection_service.get_recent_reflections(
-                session, user_id, limit=3
-            )
-            if reflections:
-                lines.append("Recent observations (state changes):")
-                lines += [f"- {r.content}" for r in reflections]
-
-            mood = await reflection_service.get_recent_mood_summary(
-                session, user_id, limit=3
-            )
-            if mood:
-                lines.append("Topic sentiment (use to adjust tone, never say aloud):")
-                for m in mood:
-                    lines.append(f"- {m['entity']}: {m['label']} ({m['valence']:+.1f})")
-
-            # ── Deterministic task pre-retrieval (Option C) ──────────────
+            # ── Deterministic task pre-retrieval ─────────────────────────
             # Match THIS turn's words against the user's active task titles and
             # surface any hits — INCLUDING their stored research/links — so the
             # answer to "what's the link for X" is already in the prompt before
@@ -302,7 +291,9 @@ async def run_voice_pipeline(
         async def _push_sentences(buf: str) -> str:
             stripped = buf.strip()
             if stripped and len(stripped) > 5 and stripped[-1] in _SENTENCE_ENDERS:
-                await sentence_queue.put(buf)
+                spoken = _for_speech(buf)
+                if spoken:
+                    await sentence_queue.put(spoken)
                 return ""
             return buf
 
@@ -312,7 +303,7 @@ async def run_voice_pipeline(
             # about the user + prior history + this turn), then run the tool loop.
             # `run_conversation` only yields SPOKEN text from a round that makes no
             # tool calls, so a pre-research/"thinking" answer is never voiced.
-            messages = [{"role": "system", "content": slm_service.system_prompt}]
+            messages = [{"role": "system", "content": brain_service.system_prompt}]
             memory_msg = await _memory_context(session_context, transcript)
             if memory_msg:
                 messages.append({"role": "system", "content": memory_msg})
@@ -320,12 +311,34 @@ async def run_voice_pipeline(
             messages.append({"role": "user", "content": transcript})
 
             spoke_filler = False
-            fallback_needed = False
-            async for ev in slm_service.run_conversation(messages, session_context):
-                if ev.get("type") == "fallback":
-                    fallback_needed = True
+            # Hard per-step wall-clock backstop. `GeminiBrain`'s own client
+            # timeout/retries normally surface a failure as a graceful
+            # `openai.APIError` (caught in run_tool_loop, yields an apology) — but
+            # Gemini's free tier has shown transient 503s, and a hang from ANY
+            # cause (a dead connection that never raises, an unexpectedly long
+            # retry chain) must never leave the pipeline silently "stuck" with no
+            # audio cue. Bounding each individual event-yield (not the whole
+            # multi-round loop) means a legitimately long multi-tool turn isn't
+            # cut short, but a single stalled step is.
+            brain_events = brain_service.run_conversation(messages, session_context).__aiter__()
+            while True:
+                try:
+                    ev = await asyncio.wait_for(brain_events.__anext__(), timeout=25.0)
+                except StopAsyncIteration:
                     break
-                elif ev["type"] == "text":
+                except asyncio.TimeoutError:
+                    logger.error("Brain turn timed out after 25s — unsticking the pipeline")
+                    if sentence_buf.strip():
+                        spoken = _for_speech(sentence_buf)
+                        if spoken:
+                            await sentence_queue.put(spoken)
+                        sentence_buf = ""
+                    apology = "Sorry, that's taking too long — could you try again?"
+                    await _emit(apology)
+                    await sentence_queue.put(apology)
+                    break
+
+                if ev["type"] == "text":
                     await _emit(ev["text"])
                     sentence_buf += ev["text"]
                     sentence_buf = await _push_sentences(sentence_buf)
@@ -338,7 +351,9 @@ async def run_voice_pipeline(
                     if ev["name"] == "research" and not spoke_filler:
                         spoke_filler = True
                         if sentence_buf.strip():
-                            await sentence_queue.put(sentence_buf)
+                            spoken = _for_speech(sentence_buf)
+                            if spoken:
+                                await sentence_queue.put(spoken)
                             sentence_buf = ""
                         await sentence_queue.put(random.choice(_RESEARCH_FILLERS))
                 elif ev["type"] == "tool.result":
@@ -358,34 +373,11 @@ async def run_voice_pipeline(
                             "data": metadata,
                         })
 
-            if fallback_needed:
-                logger.info("SLM tool formatting failed. Escalating to OpenRouterLLM...")
-                llm_service = OpenRouterLLM()
-                async for ev in llm_service.run_conversation(messages, session_context):
-                    if ev["type"] == "text":
-                        await _emit(ev["text"])
-                        sentence_buf += ev["text"]
-                        sentence_buf = await _push_sentences(sentence_buf)
-                    elif ev["type"] == "tool.start":
-                        await _send_json(ws, {"type": "tool.start", "name": ev["name"]})
-                    elif ev["type"] == "tool.result":
-                        await _send_json(ws, {
-                            "type": "tool.result",
-                            "name": ev["name"],
-                            "ok": ev["ok"],
-                            "summary": ev.get("summary", ""),
-                        })
-                        metadata = _extract_presentable_metadata(ev["name"], ev, ev.get("args") or {})
-                        if metadata:
-                            await _send_json(ws, {
-                                "type": "metadata",
-                                "tool": ev["name"],
-                                "data": metadata,
-                            })
-
             # Flush leftover text
             if sentence_buf.strip():
-                await sentence_queue.put(sentence_buf)
+                spoken = _for_speech(sentence_buf)
+                if spoken:
+                    await sentence_queue.put(spoken)
 
         except Exception as exc:
             logger.error("LLM/SLM streaming error: %s", exc, exc_info=True)

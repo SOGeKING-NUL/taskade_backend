@@ -12,3 +12,8 @@ apscheduler>=3.10.0
 tzdata>=2024.1  # zoneinfo timezone DB (required on Windows)
 pyjwt[crypto]>=2.8.0
 firebase-admin>=6.5.0  # FCM push delivery (HTTP v1) for task reminders
+# ── Memory layer (semantic/factual LTM) ──────────────────────────
+mem0ai>=2.0.0              # memory store: extraction, dedup, vector search
+google-genai>=1.0.0        # new Google GenAI SDK — mem0 v2's Gemini LLM + embedder backend
+pgvector>=0.2.5           # pgvector python types for the vector store
+psycopg2-binary>=2.9.9    # sync driver mem0's pgvector backend uses

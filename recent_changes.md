@@ -325,3 +325,69 @@ parameterized by client/model. Both `GroqSLM` and `OpenRouterLLM` now delegate t
 `llm.py` no longer carries its own copy of anything. There is now structurally only one
 place this logic can exist, so the primary and fallback paths can't drift apart again.
 Verified: `GroqSLM().system_prompt == OpenRouterLLM().system_prompt` is `True`.
+
+---
+
+## 15. Brain swap: Groq SLM → Gemini; OpenRouter demoted to research-only
+
+**Problem (user-reported + diagnosed):** Two compounding issues with Groq's
+`llama-3.3-70b-versatile` as the brain:
+1. **The "freeze after ~6 turns" was Groq rate limiting, not a context-window bug.**
+   Every turn ships ~8K tokens (system prompt + 6 tool declarations + up to 20 history
+   messages + the memory block). Groq's free tier is ~6K tokens/min, so a normal voice
+   conversation 429s within a handful of turns; the STT socket then times out waiting on
+   a reply and the pipeline appears to "freeze." No amount of prompt-trimming fixes a
+   per-minute quota that low.
+2. **Tool-call formatting was unreliable** — a documented Groq/Llama weakness. It would
+   sometimes emit a malformed `<function(update_task_status){...}</function>` as ordinary
+   text, which got spoken aloud. §11/§14 built a leak detector + a whole OpenRouter
+   fallback brain *just to paper over this*.
+
+**Decision (why Gemini, why via the OpenAI-compatible endpoint, why not LangChain):**
+- We evaluated Gemini Flash vs. staying on Groq. Groq's raw TTFT is faster on paper, but
+  that advantage is ~150ms — smaller than one STT round-trip, and irrelevant next to the
+  multi-second dead-air a 429-retry causes. Gemini 2.5 Flash-Lite gives **250K TPM + a 1M
+  context window on the free tier** (vs. Groq's 6K TPM), which makes the freeze class of
+  bug structurally impossible, plus **reliable native function calling**, which removes
+  the reason the leak-detector/fallback existed.
+- Gemini speaks the OpenAI wire format at
+  `https://generativelanguage.googleapis.com/v1beta/openai/`, so we kept the existing
+  `AsyncOpenAI` client and the shared `run_tool_loop` **verbatim** — only the client
+  config (key + base_url + model) changed. LangChain was considered and rejected: it
+  would add a heavy dependency and force a rewrite of the tool loop into its abstractions,
+  for zero functional gain over a one-line base_url swap. (Ladder: reuse what's here.)
+
+**What changed:**
+- **New `services/ai/brain.py`** (`GeminiBrain`) replaces `services/ai/slm.py`. It owns the
+  system prompt + `run_tool_loop`. `slm.py` and `llm.py` were **deleted** — the whole
+  OpenRouter *fallback brain* is gone, since Gemini's native tool calling is reliable.
+- **The `{"type":"fallback"}` escalation path in `main.py` was removed.** A hard Gemini API
+  error now surfaces as a graceful spoken line instead of switching models. The leak
+  detector was reduced from the two-layer (TOOL_REGISTRY-coupled) version to **one cheap
+  structural regex** whose only job is to never speak a raw JSON/tool-call blob aloud.
+- **OpenRouter is demoted to research-only.** It is no longer a brain; it backs the
+  `research` tool exclusively. Per the request, the research model is now
+  **`openai/gpt-4o-mini:online`** (GPT-4o-mini + live web search via OpenRouter's `:online`
+  suffix). Background memory extraction and reflections also moved off Groq onto
+  `openai/gpt-4o-mini` (they used `settings.SLM_MODEL`, which no longer exists).
+- **System prompt rewritten to 2026 voice-agent standards** (researched before editing):
+  labeled sections (Role / Now / Scope / Research / Creating tasks / Editing vs creating /
+  Multi-step plans / Answering about tasks / Style), short action-oriented rules, and
+  voice-first formatting. Every behavioral fix from §3–§14 (consent gate, update-vs-create,
+  retroactive dependency linking, clock-time preservation, research-before-answering) was
+  preserved — the prose is tighter, ~40% shorter, not weaker. Standard: describe tools by
+  what they do, avoid leaking resource-ID slugs into spoken output.
+- **Config/env cleanup:** removed `GROQ_API_KEY`, `GROQ_BASE_URL`, `SLM_MODEL`, the legacy
+  unused `LLM_MODEL`/`LLM_SYSTEM_PROMPT`, and the dead `ESCALATE_TOOL` (a leftover from the
+  retired 3-layer design, §5). Added `GEMINI_BASE_URL` / `GEMINI_MODEL`.
+
+**Caveat flagged to user:** the provided Gemini key (`AQ.Ab8RN6…`) is **not** the usual
+AI Studio format (those start with `AIza`); it looks like an OAuth/ephemeral credential and
+may not authenticate against this endpoint. The `.env` keeps a valid-format `AIza…` key as a
+commented fallback to switch to if Gemini returns 401.
+
+**Verification (user runs live tests):** app imports clean; no dangling references to the
+removed symbols (`grep` clean for `GroqSLM`/`OpenRouterLLM`/`SLM_MODEL`/`GROQ_`/`ESCALATE_TOOL`).
+Live checks to run: a long (10+ turn) conversation no longer freezes; "check that task off"
+performs a real status update with a spoken confirmation (no literal tool-call text); a
+research query streams the "let me look that up" filler then returns current facts.

@@ -31,6 +31,15 @@ def _parse_dt(value: str | None) -> datetime | None:
     return timez.ensure_aware(dt)
 
 
+def _parse_int(value) -> int | None:
+    """Coerce a model-supplied value to a positive int, or None if unusable."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
 def _parse_offsets(value) -> list[int] | None:
     """Sanitize the model-supplied reminder offsets (minutes before due). Returns
     None when nothing usable was given, so the service applies its default."""
@@ -100,6 +109,7 @@ async def create_task(args: dict, session_context: dict) -> dict:
             needs_research=bool(args.get("needs_research", False)),
             context=context,
             reminder_offsets=_parse_offsets(args.get("reminder_offsets_minutes")),
+            auto_archive_after_hours=_parse_int(args.get("auto_archive_after_hours")),
         )
         await session.commit()
         nested = f" (nested under '{parent.title}')" if parent else ""

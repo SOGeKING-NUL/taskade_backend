@@ -31,11 +31,18 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 async def init_db() -> None:
     """Ensure all tables exist."""
     async with engine.begin() as conn:
+        # pgvector extension — required by the mem0 memory store. Safe/idempotent;
+        # Supabase's postgres role has rights to create it.
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+
         await conn.run_sync(Base.metadata.create_all)
         # create_all() never alters existing tables — patch in columns added
         # after the table first existed. Alembic arrives properly in M5.
         await conn.execute(
             text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_reminded_at TIMESTAMPTZ")
+        )
+        await conn.execute(
+            text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS auto_archive_after_hours INTEGER")
         )
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR")

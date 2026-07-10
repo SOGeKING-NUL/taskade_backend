@@ -24,9 +24,10 @@ import services.memory.reflection_service as reflection_service
 logger = logging.getLogger(__name__)
 
 # Off the hot path, but still bounded so a hung call can't hang the caller.
+# OpenRouter (not the hot-path Gemini brain) handles all background LLM work.
 _client = AsyncOpenAI(
-    api_key=settings.GROQ_API_KEY,
-    base_url=settings.GROQ_BASE_URL,
+    api_key=settings.OPENROUTER_API_KEY,
+    base_url=settings.OPENROUTER_BASE_URL,
     timeout=30.0,
     max_retries=2,
 )
@@ -55,7 +56,7 @@ async def generate_greeting(user_id: str) -> str:
     async with async_session() as session:
         profile = await profile_service.ensure_profile(session, user_id)
         name, location = profile.display_name, profile.location
-        facts = await memory_service.recall(session, user_id)
+        facts = await memory_service.recall(user_id, limit=5)
         tasks = await task_service.get_tasks(session, user_id, scope="all_active")
 
         # ── Knowledge graph context ──────────────────────────────────
@@ -101,7 +102,7 @@ async def generate_greeting(user_id: str) -> str:
 
     try:
         resp = await _client.chat.completions.create(
-            model=settings.SLM_MODEL,
+            model=settings.OPENROUTER_LLM_MODEL,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": "\n\n".join(parts)},

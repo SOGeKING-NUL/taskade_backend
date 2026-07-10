@@ -30,29 +30,27 @@ class Settings:
     DEEPGRAM_ENDPOINTING_MS: int = int(os.getenv("DEEPGRAM_ENDPOINTING_MS", "500"))
     DEEPGRAM_UTTERANCE_END_MS: int = int(os.getenv("DEEPGRAM_UTTERANCE_END_MS", "1500"))
 
+    # ── Gemini brain (the single reasoning + tool-calling model) ──
+    # Used through Gemini's OpenAI-compatible endpoint, so the existing
+    # AsyncOpenAI client + tool loop work unchanged (no LangChain / new SDK).
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-2.5-flash")  # legacy, unused
-    LLM_SYSTEM_PROMPT: str = os.getenv(
-        "LLM_SYSTEM_PROMPT",
-        "You are a helpful, friendly AI assistant. Keep responses concise "
-        "and conversational — aim for 1-3 sentences unless the user asks for detail.",
+    GEMINI_BASE_URL: str = os.getenv(
+        "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"
     )
+    # gemini-2.5-flash-lite: free tier, 1M context, native function calling, fastest.
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
-    # ── Groq SLM (fast conversational path) ──────────────────────
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-    SLM_MODEL: str = os.getenv("SLM_MODEL", "llama-3.1-8b-instant")
-
-    # ── OpenRouter LLM (tool-calling / research path) ────────────
+    # ── OpenRouter (research / up-to-date info only) ─────────────
+    # No longer a general tool-calling fallback — the brain (Gemini) does all
+    # routing. OpenRouter is used ONLY by the `research` tool, which needs live
+    # web search. GPT-4o-mini with the `:online` suffix gives that cheaply.
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    # Pick a cheap, capable tool-calling model from OpenRouter's current catalog.
+    # Model for background memory extraction (no web search needed).
     OPENROUTER_LLM_MODEL: str = os.getenv("OPENROUTER_LLM_MODEL", "openai/gpt-4o-mini")
-    # Research model — a high-intelligence LLM that web-searches itself via the
-    # `:online` suffix (reuses the key above; no third-party search vendor).
-    # A Claude model uses Anthropic's native search.
+    # Research model — GPT-4o-mini web-searches itself via the `:online` suffix.
     OPENROUTER_RESEARCH_MODEL: str = os.getenv(
-        "OPENROUTER_RESEARCH_MODEL", "anthropic/claude-sonnet-4.6:online"
+        "OPENROUTER_RESEARCH_MODEL", "openai/gpt-4o-mini:online"
     )
 
     # ── Auth (Auth0 — Google sign-in via Auth0's social connection) ──
