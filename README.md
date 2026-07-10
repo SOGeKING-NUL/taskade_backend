@@ -7,6 +7,7 @@ Taskade is a personal assistant you talk to instead of type into. You speak natu
 - **Brain:** Gemini, via an OpenAI-compatible endpoint; OpenRouter for web research and background memory extraction
 - **Memory:** mem0, embedded with Gemini's embedding model, stored in pgvector on Postgres (Supabase)
 - **Auth / DB / Backend / Frontend:** Auth0 (Google sign-in) · Postgres (Supabase) · FastAPI · React
+- **Deployment:** GitHub Actions pushes straight to the Hugging Face Space on every push to `main` — no manual deploy step
 
 ## Demo
 
@@ -46,7 +47,7 @@ Speech-to-text is Deepgram Nova-3, chosen mainly for server-side endpointing tha
 
 ## Branches
 
-`main` is the stable version. `mem0-implementation` swaps the memory layer over to mem0 with real vector embeddings and semantic search instead of the earlier flat-fact matching — it's tested and working end-to-end against the live database but hasn't been merged in yet. Details on exactly what changed are in `MEM0_BRANCH_README.md`.
+`main` is the stable version. `mem0-implementation` swaps the memory layer over to mem0 with real vector embeddings and semantic search instead of the earlier flat-fact matching — it's tested and working end-to-end against the live database but hasn't been merged in yet. Details on exactly what changed are in `docs/MEM0_BRANCH_README.md` on that branch.
 
 ## Where to read more
 
