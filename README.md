@@ -7,7 +7,7 @@ Taskade is a personal assistant you talk to instead of type into. You speak natu
 - **Brain:** Gemini, via an OpenAI-compatible endpoint; OpenRouter for web research and background memory extraction
 - **Memory:** mem0, embedded with Gemini's embedding model, stored in pgvector on Postgres (Supabase)
 - **Auth / DB / Backend / Frontend:** Auth0 (Google sign-in) · Postgres (Supabase) · FastAPI · React
-- **Deployment:** GitHub Actions pushes straight to the Hugging Face Space on every push to `main` — no manual deploy step
+- **Deployment:** a GitHub Actions workflow pushes straight to the Hugging Face Space on every push to `main` using a publihs.yml file, no manual deploy step
 
 ## Demo
 
