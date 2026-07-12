@@ -11,11 +11,13 @@ Taskade is a personal assistant you talk to instead of type into. You speak natu
 
 ## Demo
 
-*(video goes here)*
+[![Watch the Taskade demo](https://img.youtube.com/vi/nx-GjFpnZPc/maxresdefault.jpg)](https://youtu.be/nx-GjFpnZPc)
+
+▶️ [Watch the demo on YouTube](https://youtu.be/nx-GjFpnZPc)
 
 ## System design
 
-*(diagram goes here)*
+![System Design](taskade_sd.png)
 
 ## How a conversation actually works
 
