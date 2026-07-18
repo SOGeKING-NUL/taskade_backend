@@ -55,11 +55,22 @@ async def init_db() -> None:
         await conn.execute(
             text("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS last_checkin_on DATE")
         )
-        # ── Temporal Knowledge Graph patches (Milestone 6) ───────────
+        # ── Memory revamp: drop the retired knowledge-graph + reflection
+        # layer (entities/entity_edges/reflections/mood_signals). CASCADE
+        # clears the inter-table FKs (edges → entities, mood → entities).
+        # Idempotent — a no-op once the tables are already gone.
         await conn.execute(
-            text("ALTER TABLE entity_edges ADD COLUMN IF NOT EXISTS target_date TIMESTAMPTZ")
+            text(
+                "DROP TABLE IF EXISTS "
+                "entity_edges, mood_signals, entities, reflections CASCADE"
+            )
+        )
+        # Task simplification: drop the removed dependency-chain + research-poll
+        # columns. Idempotent — a no-op once already gone.
+        await conn.execute(
+            text("ALTER TABLE tasks DROP COLUMN IF EXISTS depends_on_id")
         )
         await conn.execute(
-            text("ALTER TABLE entity_edges ADD COLUMN IF NOT EXISTS horizon_scale VARCHAR DEFAULT 'medium'")
+            text("ALTER TABLE tasks DROP COLUMN IF EXISTS requires_research")
         )
     logger.info("Database ready — tables ensured")

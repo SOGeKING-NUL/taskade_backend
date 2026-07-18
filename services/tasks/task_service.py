@@ -157,11 +157,9 @@ async def create_task(
     title: str,
     description: str | None = None,
     parent: str | None = None,
-    depends_on: str | None = None,
     due_at: datetime | None = None,
     window_start: datetime | None = None,
     window_end: datetime | None = None,
-    needs_research: bool = False,
     context: dict | None = None,
     reminder_offsets: list[int] | None = None,
     ramp_up: bool = False,
@@ -169,21 +167,16 @@ async def create_task(
     await ensure_user(session, user_id)
 
     parent_task = await find_task(session, user_id, parent) if parent else None
-    dep_task = await find_task(session, user_id, depends_on) if depends_on else None
-
-    blocked = dep_task is not None and dep_task.status not in _CLOSED
 
     task = Task(
         user_id=user_id,
         title=title,
         description=description,
         parent_id=parent_task.id if parent_task else None,
-        depends_on_id=dep_task.id if dep_task else None,
-        status="blocked" if blocked else "pending",
+        status="pending",
         due_at=due_at,
         window_start=window_start,
         window_end=window_end,
-        requires_research=needs_research,
         context=context,
     )
     session.add(task)
@@ -217,16 +210,18 @@ async def update_task(
     window_start: datetime | None = None,
     window_end: datetime | None = None,
     parent: str | None = None,
-    depends_on: str | None = None,
+    new_status: str | None = None,
+    note: str | None = None,
     research_summary: str | None = None,
     source_links: list | None = None,
     reminder_offsets: list[int] | None = None,
     ramp_up: bool = False,
 ) -> Task | None:
     """
-    Patch fields on an EXISTING task — distinct from update_status (status-only).
-    This is what 'add the link/fee to that reminder' should call instead of
-    create_task, so amending a task doesn't produce a duplicate row.
+    Patch fields on an EXISTING task — including its status (mark done/cancelled).
+    This is what 'add the link/fee to that reminder', 'move it to Friday', or
+    'I finished it' should call instead of create_task, so amending a task never
+    produces a duplicate row.
 
     Research findings are MERGED into context.research, not overwritten — calling
     this twice (e.g. once for the link, later for a date change) doesn't clobber
@@ -254,13 +249,6 @@ async def update_task(
             if parent_task.task_type != "milestone":
                 parent_task.task_type = "milestone"
 
-    if depends_on:
-        dep_task = await find_task(session, user_id, depends_on)
-        if dep_task is not None:
-            task.depends_on_id = dep_task.id
-            if dep_task.status not in _CLOSED and task.status not in _CLOSED:
-                task.status = "blocked"
-
     if research_summary or source_links:
         ctx = dict(task.context or {})
         existing = dict(ctx.get("research") or {})
@@ -271,14 +259,26 @@ async def update_task(
         ctx["research"] = existing
         task.context = ctx
 
+    if note:
+        ctx = dict(task.context or {})
+        ctx.setdefault("notes", []).append(note)
+        task.context = ctx
+
+    if new_status:
+        task.status = new_status
+        # A finished/cancelled task should never ping — stand down its still-live
+        # reminders (rows that already fired are kept as a delivery record).
+        if new_status in _CLOSED:
+            await reminder_service.cancel_for_task(session, task.id)
+
     await session.flush()
     logger.info("update_task → %s (%s)", task.title, task.id)
 
-    # Re-arm reminders only when the due time actually changed (a link/fee/title
-    # edit leaves `due_at` None here, so existing — including already-sent —
-    # reminders are left untouched). A new due time regenerates the ledger rows;
-    # `ramp_up` swaps in an escalating "remind me until it starts" schedule.
-    if due_at is not None:
+    # Re-arm reminders only when the due time actually changed AND the task is
+    # still open (a link/fee/title edit leaves `due_at` None, so existing —
+    # including already-sent — reminders are untouched). A new due time
+    # regenerates the ledger rows; `ramp_up` swaps in an escalating schedule.
+    if due_at is not None and task.status not in _CLOSED:
         offsets = reminder_offsets
         if ramp_up and task.due_at is not None:
             offsets = reminder_service.ramp_up_offsets(task.due_at)
@@ -347,50 +347,6 @@ async def get_tasks(
     return active
 
 
-async def update_status(
-    session: AsyncSession,
-    user_id: str,
-    task_ref: str,
-    new_status: str,
-    note: str | None = None,
-) -> tuple[Task | None, list[str]]:
-    task = await find_task(session, user_id, task_ref)
-    if task is None:
-        return None, []
-
-    task.status = new_status
-    if note:
-        ctx = dict(task.context or {})
-        ctx.setdefault("notes", []).append(note)
-        task.context = ctx
-    await session.flush()
-
-    # A finished or cancelled task should never ping — stand down its still-live
-    # reminders (rows that already fired are kept as a delivery record).
-    if new_status in _CLOSED:
-        await reminder_service.cancel_for_task(session, task.id)
-
-    # When a task completes, unblock anything that was waiting on it.
-    unblocked: list[str] = []
-    if new_status == "done":
-        deps = (
-            await session.execute(
-                select(Task).where(
-                    Task.user_id == user_id,
-                    Task.depends_on_id == task.id,
-                    Task.status == "blocked",
-                )
-            )
-        ).scalars().all()
-        for d in deps:
-            d.status = "pending"
-            unblocked.append(d.title)
-        await session.flush()
-
-    logger.info("update_status → %s = %s (unblocked %d)", task.title, new_status, len(unblocked))
-    return task, unblocked
-
-
 async def get_due_reminders(session: AsyncSession, user_id: str) -> list[Task]:
     """Open tasks that are due (or overdue) and haven't been announced yet."""
     now = datetime.now(timezone.utc)
@@ -443,42 +399,3 @@ async def consume_due_reminders(
         return [], ""
     await mark_reminded(session, due)
     return due, _reminder_message(due)
-
-
-async def get_research_schedule(
-    session: AsyncSession, user_id: str
-) -> list[dict]:
-    """Every task with `requires_research=True`, with its structured research
-    intent and last refresh outcome surfaced for the debug panel.
-
-    Sorted by `next_attempt_at` soonest-first; legacy tasks without a
-    structured intent sort last (they poll on every sweep).
-    """
-    rows = (
-        await session.execute(
-            select(Task).where(
-                Task.user_id == user_id,
-                Task.requires_research.is_(True),
-            )
-        )
-    ).scalars().all()
-
-    schedule = []
-    for t in rows:
-        ctx = t.context or {}
-        intent = ctx.get("research_intent") or {}
-        refresh = ctx.get("research_refresh") or {}
-        schedule.append({
-            "task_id": t.id,
-            "title": t.title,
-            "status": t.status,
-            "query": intent.get("query", ""),
-            "success_condition": intent.get("success_condition", ""),
-            "retry_interval_days": intent.get("retry_interval_days"),
-            "next_attempt_at": intent.get("next_attempt_at"),
-            "last_outcome": refresh.get("note") or refresh.get("summary") or None,
-        })
-
-    # Soonest retry first; None sorts last.
-    schedule.sort(key=lambda s: s["next_attempt_at"] or "9999")
-    return schedule

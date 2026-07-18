@@ -71,7 +71,7 @@ app.add_middleware(
 
 # ── Global services (stateless, shared across connections) ───────────────
 # Single brain: the Groq SLM answers, reasons, and calls the tools itself
-# (create_task / query_tasks / update_task_status / research). `research` is the
+# (create_task / query_tasks / update_task / research). `research` is the
 # only tool that reaches out to OpenRouter (web search) under the hood.
 slm_service = GroqSLM()
 
@@ -93,6 +93,16 @@ _RESEARCH_FILLERS = [
     "Give me a moment to check on that.",
     "Sure, let me research that real quick.",
     "One moment while I look into that.",
+]
+
+# Neutral fillers spoken while a task write commits, so the create/update round
+# isn't dead silence. Kept neutral so they flow whether the model then confirms
+# ("Done —…") or asks a follow-up ("Want me to set a reminder?").
+_ACTION_FILLERS = [
+    "One moment.",
+    "Okay.",
+    "Sure.",
+    "Alright.",
 ]
 
 # Spoken when every AI provider is unavailable (e.g. all rate-limited) so the
@@ -118,14 +128,21 @@ def _extract_presentable_metadata(tool_name: str, result: dict, args: dict) -> d
     result for display as a separate UI card — deterministic, not dependent
     on the model choosing to recite anything correctly.
 
-    Deliberately narrow: the card should appear ONLY when the user explicitly
-    asked about a specific, already-tracked task — never as a side effect of
-    research running in the background or a task simply being created/updated.
-    That means exactly one case: `query_tasks` called with
-    `scope == "specific_task"`. Everything else returns None.
-
-    Returns None when there's nothing worth surfacing.
+    Two cases surface a card:
+      • `research` — every call, so its findings/links always land on-screen
+        (the model is now told to speak only a one-line summary of these).
+      • `query_tasks` called with `scope == "specific_task"` — the user asked
+        about one already-tracked task, so its stored research/links/due date
+        show up as a card.
+    Everything else returns None — never a side effect of create/update alone.
     """
+    if tool_name == "research":
+        links = result.get("links") or []
+        findings = (result.get("findings") or "").strip()
+        if not links and not findings:
+            return None
+        return {"research": {"summary": findings, "links": links}}
+
     if tool_name != "query_tasks" or args.get("scope") != "specific_task":
         return None
 
@@ -138,7 +155,7 @@ def _extract_presentable_metadata(tool_name: str, result: dict, args: dict) -> d
         if t.get("due_at"):
             item["due_at"] = t["due_at"]
         ctx = t.get("context") or {}
-        for key in ("research", "research_refresh"):
+        for key in ("research",):
             blob = ctx.get(key) or {}
             if isinstance(blob, dict):
                 if blob.get("links"):
@@ -157,12 +174,10 @@ async def _memory_context(session_context: dict, transcript: str) -> str:
     injected into the SLM's prompt each turn — so `research` / `create_task` run
     with the user's known prefs/facts in view.
 
-    Pulls from five sources:
+    Pulls from three sources (memory revamp — was five):
       1. Profile fields (from session context, loaded at connect time).
-      2. Flat recalled facts (backward-compat UserMemory rows).
-      3. Active knowledge-graph edges (temporal graph).
-      4. Recent reflections + mood signals (state-delta insights).
-      5. Tasks deterministically matched against THIS turn's transcript — so a
+      2. Recalled durable facts (UserMemory rows — the one long-term store).
+      3. Tasks deterministically matched against THIS turn's transcript — so a
          task's stored research/links are already in front of the model before
          it ever decides whether to call `research` or `query_tasks`. This is
          a fixed DB lookup, not a model judgment call, so it can't be skipped
@@ -190,36 +205,6 @@ async def _memory_context(session_context: dict, transcript: str) -> str:
                 lines.append("Remembered facts about the user:")
                 lines += [f"- {f}" for f in facts]
 
-            # ── Temporal Knowledge Graph context ─────────────────────
-            from services.memory import graph_service, reflection_service
-
-            edges = await graph_service.get_active_edges(session, user_id, limit=20)
-            if edges:
-                names = await graph_service.get_entity_name_map(session, user_id)
-                lines.append("Knowledge graph (active relationships):")
-                for edge in edges:
-                    src = names.get(edge.source_id, "?")
-                    tgt = names.get(edge.target_id, "?")
-                    target_info = ""
-                    if edge.target_date:
-                        target_info = f" (target: {edge.target_date.strftime('%b %d, %Y')})"
-                    lines.append(f"- {src} → {edge.relation} → {tgt}{target_info}")
-
-            reflections = await reflection_service.get_recent_reflections(
-                session, user_id, limit=3
-            )
-            if reflections:
-                lines.append("Recent observations (state changes):")
-                lines += [f"- {r.content}" for r in reflections]
-
-            mood = await reflection_service.get_recent_mood_summary(
-                session, user_id, limit=3
-            )
-            if mood:
-                lines.append("Topic sentiment (use to adjust tone, never say aloud):")
-                for m in mood:
-                    lines.append(f"- {m['entity']}: {m['label']} ({m['valence']:+.1f})")
-
             # ── Deterministic task pre-retrieval (Option C) ──────────────
             # Match THIS turn's words against the user's active task titles and
             # surface any hits — INCLUDING their stored research/links — so the
@@ -238,7 +223,7 @@ async def _memory_context(session_context: dict, transcript: str) -> str:
                     due = t.due_at.strftime("%d %b %Y") if t.due_at else "no due date"
                     lines.append(f'- "{t.title}" (status: {t.status}, {due})')
                     ctx = t.context or {}
-                    for key in ("research", "research_refresh"):
+                    for key in ("research",):
                         blob = ctx.get(key) or {}
                         if not isinstance(blob, dict):
                             continue
@@ -291,7 +276,7 @@ async def run_voice_pipeline(
 
     Receives a pre-computed transcript (from Deepgram utterance_end). The Groq
     SLM holds the conversation, answers directly, and calls tools itself
-    (create_task / query_tasks / update_task_status / research) as needed; its
+    (create_task / query_tasks / update_task / research) as needed; its
     final spoken answer streams sentence-by-sentence into the TTS path.
     Conversation history is stored in OpenAI message format.
     """
@@ -343,16 +328,17 @@ async def run_voice_pipeline(
                     sentence_buf = await _push_sentences(sentence_buf)
                 elif ev["type"] == "tool.start":
                     await _send_json(ws, {"type": "tool.start", "name": ev["name"]})
-                    # Speak a short filler while a slow web lookup runs, so the user
-                    # isn't left in silence. Pushed straight to TTS (not via _emit)
-                    # so it's spoken but NOT recorded as part of the answer text or
-                    # history. Once per turn, research-only.
-                    if ev["name"] == "research" and not spoke_filler:
+                    # Speak a short filler while a slow tool runs, so the user isn't
+                    # left in silence during the extra round-trip. Pushed straight to
+                    # TTS (not via _emit) so it's spoken but NOT recorded as part of
+                    # the answer text or history. Once per turn.
+                    if not spoke_filler and ev["name"] in ("research", "create_task", "update_task"):
                         spoke_filler = True
                         if sentence_buf.strip():
                             await sentence_queue.put(sentence_buf)
                             sentence_buf = ""
-                        await sentence_queue.put(random.choice(_RESEARCH_FILLERS))
+                        fillers = _RESEARCH_FILLERS if ev["name"] == "research" else _ACTION_FILLERS
+                        await sentence_queue.put(random.choice(fillers))
                 elif ev["type"] == "tool.result":
                     await _send_json(ws, {
                         "type": "tool.result",
@@ -856,13 +842,33 @@ async def list_tasks(user_id: str = Depends(get_current_user_id)):
 async def delete_task(id: str, user_id: str = Depends(get_current_user_id)):
     """Soft-delete a task by updating its status to cancelled."""
     async with async_session() as session:
-        task, _ = await task_service.update_status(
-            session, user_id, id, "cancelled"
+        task = await task_service.update_task(
+            session, user_id, id, new_status="cancelled"
         )
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
         await session.commit()
     return {"ok": True, "id": task.id}
+
+
+class TaskStatusIn(BaseModel):
+    status: str  # pending | active | done | cancelled
+
+
+@app.patch("/tasks/{id}")
+async def set_task_status(
+    id: str, body: TaskStatusIn, user_id: str = Depends(get_current_user_id)
+):
+    """Set a task's status from the Tasks UI (Done / Reopen / Cancel buttons)."""
+    if body.status not in task_service.VALID_STATUSES:
+        raise HTTPException(status_code=400, detail=f"'{body.status}' is not a valid status")
+    async with async_session() as session:
+        task = await task_service.update_task(session, user_id, id, new_status=body.status)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        brief = task.to_brief()
+        await session.commit()
+    return {"ok": True, "task": brief}
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -942,17 +948,12 @@ async def reminder_delivered(
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  Scheduler & research-retry debug endpoint
+#  Scheduler debug endpoint
 # ═════════════════════════════════════════════════════════════════════════
 @app.get("/debug/scheduler")
 async def scheduler_debug(user_id: str = Depends(get_current_user_id)):
-    """Return APScheduler job status + the calling user's research-retry
-    schedule.  Per-user scoped — no cross-user data exposure.  Purely
-    read-only introspection for the debug panel."""
-    jobs = get_job_status()
-    async with async_session() as session:
-        research_schedule = await task_service.get_research_schedule(session, user_id)
-    return {"jobs": jobs, "research_schedule": research_schedule}
+    """Return APScheduler job status. Read-only introspection for the debug panel."""
+    return {"jobs": get_job_status()}
 
 
 # ═════════════════════════════════════════════════════════════════════════

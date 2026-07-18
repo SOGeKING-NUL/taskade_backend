@@ -1,20 +1,19 @@
 """
 Task model — a single self-referential table supporting arbitrary-depth task
-trees plus a separate sequencing dependency.
+trees via `parent_id` (hierarchy/grouping: a sub-step belongs to a goal).
 
-Two distinct relationships (deliberately separate):
-  • parent_id      — hierarchy/grouping (a sub-step belongs to a goal)
-  • depends_on_id  — sequencing (this task is blocked until another is done)
+Enum-like fields are plain strings validated at the service layer (simpler
+migrations, portable for testing).
 
-A JLPT-style goal happens to use both; a general task may use neither, either,
-or both. Enum-like fields are plain strings validated at the service layer
-(simpler migrations, portable for testing).
+(The former `depends_on_id` sequencing/blocking relationship and the
+`requires_research` background-poll flag were removed in the task simplification
+— see docs/db_revamp.md.)
 """
 
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Text, Boolean, DateTime, ForeignKey, JSON
+from sqlalchemy import String, Text, DateTime, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,9 +37,6 @@ class Task(Base):
     parent_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    depends_on_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("tasks.id"), nullable=True
-    )
 
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -60,7 +56,6 @@ class Task(Base):
 
     # manual_confirm | auto_detect  (only manual is implemented today)
     completion_condition: Mapped[str] = mapped_column(String, default="manual_confirm")
-    requires_research: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Freeform structured data (research output, portal links, etc.).
     # JSONB on Postgres, JSON elsewhere (for portability/testing).
@@ -76,7 +71,7 @@ class Task(Base):
     def to_brief(self) -> dict:
         """Compact dict for tool results / API responses.
 
-        Includes `context` (research findings/links, research_intent, notes) —
+        Includes `context` (research findings/links, notes) —
         without this, a task's stored research is invisible to `query_tasks`,
         so the model has no way to answer "what was the link" except by
         re-researching from scratch.

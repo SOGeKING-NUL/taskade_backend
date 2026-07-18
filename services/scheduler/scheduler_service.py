@@ -32,8 +32,6 @@ from core.config import settings
 from db.session import async_session
 import services.tasks.task_service as task_service
 import services.memory.profile_service as profile_service
-from services.research.refresh_service import refresh_watched_tasks
-import services.memory.reflection_service as reflection_service
 import services.reminders.reminder_service as reminder_service
 import services.devices.device_service as device_service
 import services.engagement.checkin_service as checkin_service
@@ -172,41 +170,6 @@ def _local_now(tz_name: str) -> datetime:
         return datetime.now(ZoneInfo("UTC"))
 
 
-async def _refresh_one_user(user_id: str) -> None:
-    """
-    Per-user daily research refresh — this job runs hourly for every user, but
-    each user only actually refreshes once a day at THEIR configured local
-    check-in hour (the "6am, has registration opened?" check).
-    """
-    async with async_session() as session:
-        profile = await profile_service.ensure_profile(session, user_id)
-        hour = profile_service.checkin_hour(profile)
-        local = _local_now(profile.timezone)
-        already = profile.last_refresh_on == local.date()
-        await session.commit()
-
-    if local.hour != hour or already:
-        return
-
-    logger.info(
-        "Daily check-in hour reached for %s (%02d:00 %s) — refreshing",
-        user_id, hour, profile.timezone,
-    )
-    try:
-        updated = await refresh_watched_tasks(user_id)
-        logger.info("Daily refresh complete for %s — %d task(s) updated", user_id, updated)
-    finally:
-        async with async_session() as session:
-            await profile_service.mark_refreshed(session, user_id, local.date())
-            await session.commit()
-
-
-async def daily_task_refresh() -> None:
-    """Fan out the per-user daily refresh check across every known user."""
-    for user_id in await _all_user_ids():
-        await _refresh_one_user(user_id)
-
-
 async def _checkin_one_user(user_id: str) -> None:
     """
     Per-user daily check-in push — this runs hourly for every user, but each user
@@ -262,32 +225,6 @@ async def daily_checkin_sweep() -> None:
             logger.warning("Daily check-in failed for %s: %s", user_id, exc)
 
 
-async def daily_reflection_sweep() -> None:
-    """Run reflection sweeps for all users.
-
-    Daily sweep runs every day, weekly on Mondays, monthly on the 1st.
-    The sweep type is determined by the current day.
-    """
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-
-    for user_id in await _all_user_ids():
-        try:
-            # Daily sweep always runs.
-            await reflection_service.run_sweep(user_id, "daily")
-
-            # Weekly sweep on Mondays.
-            if now.weekday() == 0:
-                await reflection_service.run_sweep(user_id, "weekly")
-
-            # Monthly sweep on the 1st.
-            if now.day == 1:
-                await reflection_service.run_sweep(user_id, "monthly")
-
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Reflection sweep failed for %s: %s", user_id, exc)
-
-
 def start_scheduler() -> AsyncIOScheduler:
     """Create + start the recurring sweep. Call once from the app lifespan."""
     global _scheduler
@@ -319,18 +256,6 @@ def start_scheduler() -> AsyncIOScheduler:
         max_instances=1,
     )
 
-    # Daily research refresh — fires hourly, self-gates to the user's local
-    # check-in hour (per-user time-of-day, restart-safe via last_refresh_on).
-    _scheduler.add_job(
-        daily_task_refresh,
-        trigger="cron",
-        minute=0,
-        id="daily_task_refresh",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-
     # Daily check-in push — fires hourly, self-gates to each user's local
     # check-in hour, sends a time-of-day-aware summary (restart-safe via
     # last_checkin_on). No-op until FCM is configured.
@@ -339,19 +264,6 @@ def start_scheduler() -> AsyncIOScheduler:
         trigger="cron",
         minute=0,
         id="daily_checkin_sweep",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-
-    # Daily reflection sweep — generates state-delta insights from the
-    # knowledge graph.  Runs once daily at 07:00 UTC.
-    _scheduler.add_job(
-        daily_reflection_sweep,
-        trigger="cron",
-        hour=7,
-        minute=0,
-        id="daily_reflection_sweep",
         replace_existing=True,
         coalesce=True,
         max_instances=1,

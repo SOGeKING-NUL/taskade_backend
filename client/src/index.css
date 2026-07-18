@@ -1,0 +1,614 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Taskade — flat dark-grey theme, lavender reserved for interactive elements
+   and the orb. Mobile-first (fixed phone column centered on desktop).
+   Bold tight typography (Geist), sharp edges (radius 0 everywhere).
+   ═══════════════════════════════════════════════════════════════════════ */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&display=swap");
+
+/* ── Design tokens ─────────────────────────────────────────────────────── */
+:root {
+  --bg-backdrop: #0B0B0C;   /* around the phone column on desktop */
+  --bg-app: #151517;        /* flat dark grey app surface — no tint */
+  --surface: rgba(28, 28, 31, 0.82);   /* translucent frosted panels */
+  --surface-solid: #1C1C1F;
+  --border: rgba(255, 255, 255, 0.09);
+
+  --text: #F2F2F3;
+  --text-dim: rgba(242, 242, 243, 0.64);
+  --text-mute: rgba(242, 242, 243, 0.38);
+
+  --accent: #B7A6E8;        /* pastel purple — interactive elements only */
+  --accent-deep: #8E76D0;   /* deep lavender */
+  --accent-soft: #CDBEF2;   /* light lavender */
+  --accent-ink: #17151E;    /* text on accent fills */
+
+  --ok: #9BD6B6;
+  --err: #E8879B;
+
+  --col-max: 430px;
+  --font: "Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Reset ─────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  border-radius: 0;   /* sharp edges everywhere */
+}
+
+html, body { height: 100%; overflow: hidden; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg-backdrop);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background 0.13s var(--ease), color 0.13s var(--ease),
+    border-color 0.13s var(--ease), transform 0.08s var(--ease);
+}
+button:active { transform: scale(0.97); }
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ── Mobile-first shell: fixed phone column centered on the backdrop ───── */
+#root {
+  width: 100vw;
+  height: 100dvh;
+  background: var(--bg-backdrop);
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+}
+
+.app {
+  position: relative;
+  width: 100%;
+  max-width: var(--col-max);
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg-app);   /* flat — no vignette, no tint */
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+/* Post-launch shell: content area (voice/tasks) + persistent bottom nav. */
+.app.shell { align-items: stretch; }
+.shell-content { flex: 1; position: relative; overflow: hidden; min-height: 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Login / Launch / Onboarding panels
+   ═══════════════════════════════════════════════════════════════════════ */
+.launch-screen, .login-screen, .onboarding-screen {
+  justify-content: center;
+}
+
+.panel-content {
+  width: 100%;
+  max-width: 340px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: 32px 24px;
+  animation: fadeIn 0.3s var(--ease);
+}
+
+.brand {
+  font-size: 2.3rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;   /* tight, not tracked-out */
+  line-height: 1.05;
+  color: var(--text);
+}
+
+.brand-sub {
+  font-size: 0.92rem;
+  font-weight: 400;
+  color: var(--text-mute);
+  margin-bottom: 16px;
+}
+
+.greeting {
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: var(--text-dim);
+  max-width: 300px;
+  margin-bottom: 16px;
+}
+
+.btn-primary {
+  width: 100%;
+  padding: 15px 30px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border: none;
+}
+.btn-primary:hover { background: var(--accent-soft); }
+.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+.btn-ghost {
+  margin-top: 8px;
+  padding: 9px 16px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover { color: var(--text); border-color: var(--accent-deep); }
+
+.fine-print { font-size: 0.76rem; color: var(--text-mute); }
+
+/* ── Onboarding form ──────────────────────────────────────────────────── */
+.panel-content.form { align-items: stretch; text-align: left; gap: 18px; }
+.panel-content.form .brand,
+.panel-content.form .brand-sub { text-align: center; }
+
+.field { display: flex; flex-direction: column; gap: 7px; }
+.field-label {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.field-label em { color: var(--text-mute); font-style: normal; font-weight: 400; }
+
+.field-input {
+  width: 100%;
+  padding: 12px 13px;
+  font-family: var(--font);
+  font-size: 0.95rem;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--border);
+  outline: none;
+  transition: border-color 0.13s var(--ease), background 0.13s var(--ease);
+}
+.field-input::placeholder { color: var(--text-mute); }
+.field-input:focus { border-color: var(--accent); background: rgba(255, 255, 255, 0.06); }
+
+.field-row { display: flex; gap: 8px; }
+.field-row .field-input { flex: 1; }
+.field-row .btn-ghost { margin-top: 0; white-space: nowrap; }
+
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip-select {
+  flex: 1;
+  min-width: 68px;
+  padding: 10px 8px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+}
+.chip-select:hover { border-color: var(--accent-deep); color: var(--text); }
+.chip-select.on {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.panel-content.form .btn-primary { margin-top: 4px; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Voice stage — orb-centric
+   ═══════════════════════════════════════════════════════════════════════ */
+.voice-chat.stage {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 30px;
+  position: relative;
+  padding: 28px;
+}
+
+.conn-dot {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: 8px;
+  height: 8px;
+  background: var(--err);
+  transition: background 0.4s var(--ease), box-shadow 0.4s var(--ease);
+}
+.conn-dot.connected {
+  background: var(--ok);
+  box-shadow: 0 0 10px rgba(155, 214, 182, 0.5);
+}
+
+.clear-btn, .mute-btn, .transcript-btn, .dev-btn {
+  position: absolute;
+  top: 12px;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.clear-btn { left: 14px; }
+.clear-btn:hover { color: var(--err); border-color: var(--err); }
+.clear-btn svg, .mute-btn svg, .transcript-btn svg, .dev-btn svg { width: 16px; height: 16px; }
+
+/* Dimmed + inert when not the active view — the orb keeps animating faintly
+   underneath the translucent Tasks overlay instead of vanishing entirely. */
+.voice-chat.inactive {
+  opacity: 0.5;
+  pointer-events: none;
+  transition: opacity 0.25s var(--ease);
+}
+
+.orb-wrap { width: 260px; height: 260px; flex-shrink: 0; }
+.orb-canvas { position: relative; width: 100%; height: 100%; }
+
+.stage-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  text-align: center;
+  transition: color 0.3s var(--ease);
+}
+.stage.recording .stage-label,
+.stage.speaking  .stage-label { color: var(--text); }
+
+/* Transient server notice (model busy / reconnecting) */
+.notice {
+  font-size: 0.78rem;
+  color: var(--text-mute);
+  animation: fadeIn 0.2s var(--ease);
+}
+
+/* Mute toggle — fixed top-right, mirroring clear-btn (top-left). Absolute
+   positioning so it can never be clipped by the centered flex stage on short
+   viewports (that was the bug — it used to be a flex child that could scroll
+   off with overflow:hidden). */
+.mute-btn { right: 40px; }
+.mute-btn:hover { color: var(--accent); border-color: var(--accent-deep); }
+.mute-btn.on {
+  color: var(--err);
+  border-color: var(--err);
+  background: rgba(232, 135, 155, 0.08);
+}
+
+/* ── Tool activity chips (ephemeral, current turn) ────────────────────── */
+.tool-activity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  max-width: 90%;
+}
+.tool-chip {
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 4px 10px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  animation: fadeIn 0.15s var(--ease);
+}
+.tool-chip.start { color: var(--accent-soft); }
+.tool-chip.fail { color: var(--err); border-color: var(--err); }
+
+/* ── Bottom stack (reminders, metadata cards, transcript) ─────────────── */
+.stage-bottom {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 0 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Due-reminders card */
+.reminder-card {
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--accent-deep);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  animation: panelIn 0.22s var(--ease);
+}
+.reminder-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.reminder-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent-soft);
+}
+.reminder-dismiss {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 0.8rem;
+}
+.reminder-dismiss:hover { color: var(--text); }
+.reminder-row { font-size: 0.9rem; color: var(--text); padding: 3px 0; }
+
+/* Metadata cards (clickable links/dates, never spoken) */
+.meta-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.meta-card {
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  animation: panelIn 0.22s var(--ease);
+}
+.meta-title { font-weight: 600; font-size: 0.95rem; color: var(--text); }
+/* pre-line: research findings are prose with real line breaks — preserve them
+   instead of letting normal CSS whitespace-collapse squash them into one wall
+   of text (that, plus stripped markdown syntax, is the "not formatted" fix). */
+.meta-row { font-size: 0.82rem; color: var(--text-dim); margin-top: 4px; white-space: pre-line; }
+.meta-row.dim { color: var(--text-mute); }
+.meta-link {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 0.82rem;
+  color: var(--accent);
+  text-decoration: underline;
+  word-break: break-all;
+}
+.meta-link:hover { color: var(--accent-soft); }
+
+/* ── Live caption — ONE turn at a time (interim speech OR the AI's answer),
+   never the accumulated history. Full history lives in TranscriptPage. ──── */
+.caption {
+  width: 100%;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  animation: panelIn 0.22s var(--ease);
+}
+
+.t-msg { font-size: 0.98rem; line-height: 1.5; max-width: 88%; }
+.t-msg.user { align-self: flex-end; text-align: right; color: var(--text); font-weight: 500; }
+.t-msg.assistant { align-self: flex-start; text-align: left; color: var(--text-dim); }
+.t-msg.error { color: var(--err); }
+/* Inside .caption (single bubble, not a flex column) the message is centered. */
+.caption .t-msg { max-width: 100%; text-align: center; margin: 0 auto; }
+
+/* Transcript toggle — top row, mirroring clear-btn/mute-btn placement. */
+.transcript-btn { left: 56px; }
+.transcript-btn:hover { color: var(--accent); border-color: var(--accent-deep); }
+
+/* Dev-only reminder-check trigger — dashed border marks it as a debug
+   control, distinct from the real user-facing buttons around it. Only ever
+   rendered when import.meta.env.DEV, so this never ships to production. */
+.dev-btn { left: 98px; border-style: dashed; color: var(--text-mute); }
+.dev-btn:hover { color: var(--accent-soft); border-color: var(--accent-deep); }
+
+.page-head-actions { display: flex; gap: 8px; }
+
+/* ── Bottom navigation ────────────────────────────────────────────────── */
+.bottom-nav {
+  flex-shrink: 0;
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: var(--bg-app);
+}
+.nav-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 9px 0 11px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-mute);
+  background: transparent;
+  border: none;
+  border-top: 2px solid transparent;
+}
+.nav-tab svg { width: 20px; height: 20px; }
+.nav-tab:hover { color: var(--text-dim); }
+.nav-tab:active { transform: none; }
+.nav-tab.on { color: var(--accent); border-top-color: var(--accent); }
+
+/* ── Tasks overlay — translucent sheet over the still-visible (dimmed,
+   muted) orb, per the "drawer with the orb glow showing through" design. ── */
+.page {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  border-top: 2px solid var(--accent);
+  animation: fadeIn 0.2s var(--ease);
+}
+.page-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.page-title { font-size: 1.4rem; font-weight: 800; letter-spacing: -0.02em; }
+.page-refresh {
+  width: 34px;
+  height: 34px;
+  font-size: 1rem;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+}
+.page-refresh:hover { color: var(--accent); border-color: var(--accent-deep); }
+.page-body { flex: 1; overflow-y: auto; padding: 6px 20px 24px; }
+.page-empty {
+  color: var(--text-mute);
+  font-size: 0.9rem;
+  padding: 30px 0;
+  text-align: center;
+}
+.page-section {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+  padding: 16px 0 6px;
+}
+
+/* ── Tasks grid (card tiles, 2-up on the phone column) ────────────────── */
+.tasks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  padding: 8px 0 14px;
+}
+
+.task-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--border);
+}
+.task-card.closed { opacity: 0.55; }
+
+.task-status {
+  align-self: flex-start;
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.task-status.s-active { color: var(--accent); border-color: var(--accent-deep); }
+.task-status.s-done { color: var(--ok); border-color: var(--ok); }
+.task-status.s-cancelled { color: var(--text-mute); }
+
+.task-title { font-weight: 600; font-size: 0.92rem; line-height: 1.3; color: var(--text); }
+.task-sub { font-size: 0.76rem; color: var(--text-mute); }
+.task-link {
+  font-size: 0.76rem;
+  color: var(--accent);
+  text-decoration: underline;
+  word-break: break-all;
+}
+.task-link:hover { color: var(--accent-soft); }
+
+/* Sub-tasks, nested inside their parent milestone's card. */
+.task-children {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.task-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+}
+.task-child.closed { opacity: 0.5; }
+.task-child .task-status { font-size: 0.58rem; padding: 1px 4px; }
+.task-child-title { flex: 1; color: var(--text-dim); }
+.task-mini-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  font-size: 0.7rem;
+  line-height: 1;
+  color: var(--text-mute);
+  background: transparent;
+  border: 1px solid var(--border);
+}
+.task-mini-btn:hover { color: var(--ok); border-color: var(--ok); }
+
+/* Status actions */
+.task-actions { display: flex; gap: 6px; margin-top: 4px; }
+.task-btn {
+  flex: 1;
+  padding: 7px 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid var(--border);
+}
+.task-btn.done { color: var(--ok); }
+.task-btn.done:hover { border-color: var(--ok); }
+.task-btn.cancel { color: var(--err); }
+.task-btn.cancel:hover { border-color: var(--err); }
+.task-btn.reopen { color: var(--accent); }
+.task-btn.reopen:hover { border-color: var(--accent-deep); }
+
+@media (max-width: 380px) {
+  .tasks-grid { grid-template-columns: 1fr 1fr; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Animations
+   ═══════════════════════════════════════════════════════════════════════ */
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ── Responsive: on real phones the column fills the screen ────────────── */
+@media (max-width: 460px) {
+  .app { max-width: 100%; border-left: none; border-right: none; }
+  .orb-wrap { width: 220px; height: 220px; }
+  .t-msg { font-size: 0.93rem; }
+}

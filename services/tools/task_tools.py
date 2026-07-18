@@ -69,22 +69,8 @@ async def create_task(args: dict, session_context: dict) -> dict:
     context = None
     research_summary = args.get("research_summary")
     source_links = args.get("source_links")
-    research_query = args.get("research_query")
-    success_condition = args.get("success_condition")
-    retry_interval = args.get("retry_interval_days")
-
     if research_summary or source_links:
         context = {"research": {"summary": research_summary, "links": source_links or []}}
-
-    # When the task needs background research polling, store the structured
-    # intent so the scheduler knows exactly what to search for and when to stop.
-    if research_query or success_condition:
-        context = context or {}
-        context["research_intent"] = {
-            "query": research_query or "",
-            "success_condition": success_condition or "",
-            "retry_interval_days": retry_interval or 7,
-        }
 
     async with async_session() as session:
         task, parent = await svc.create_task(
@@ -93,22 +79,19 @@ async def create_task(args: dict, session_context: dict) -> dict:
             title=args.get("title", "Untitled task"),
             description=args.get("description"),
             parent=args.get("parent_task"),
-            depends_on=args.get("depends_on_task"),
             due_at=_parse_dt(args.get("due_at")),
             window_start=_parse_dt(args.get("window_start")),
             window_end=_parse_dt(args.get("window_end")),
-            needs_research=bool(args.get("needs_research", False)),
             context=context,
             reminder_offsets=_parse_offsets(args.get("reminder_offsets_minutes")),
             ramp_up=bool(args.get("remind_until_start", False)),
         )
         await session.commit()
         nested = f" (nested under '{parent.title}')" if parent else ""
-        blocked = " It's blocked until its prerequisite is done." if task.status == "blocked" else ""
         return {
             "ok": True,
             "task": task.to_brief(),
-            "summary": f"Created task '{task.title}'{nested}.{blocked}",
+            "summary": f"Created task '{task.title}'{nested}.",
         }
 
 
@@ -117,6 +100,10 @@ async def update_task(args: dict, session_context: dict) -> dict:
     task_ref = args.get("task", "")
     if not task_ref:
         return {"ok": False, "error": "missing_task", "summary": "Which task should I update?"}
+
+    new_status = args.get("new_status")
+    if new_status and new_status not in svc.VALID_STATUSES:
+        return {"ok": False, "error": "invalid_status", "summary": f"'{new_status}' is not a valid status."}
 
     async with async_session() as session:
         task = await svc.update_task(
@@ -129,7 +116,8 @@ async def update_task(args: dict, session_context: dict) -> dict:
             window_start=_parse_dt(args.get("window_start")),
             window_end=_parse_dt(args.get("window_end")),
             parent=args.get("parent_task"),
-            depends_on=args.get("depends_on_task"),
+            new_status=new_status,
+            note=args.get("note"),
             research_summary=args.get("research_summary"),
             source_links=args.get("source_links"),
             reminder_offsets=_parse_offsets(args.get("reminder_offsets_minutes")),
@@ -138,7 +126,11 @@ async def update_task(args: dict, session_context: dict) -> dict:
         if task is None:
             return {"ok": False, "error": "task_not_found", "summary": "I couldn't find that task."}
         await session.commit()
-        return {"ok": True, "task": task.to_brief(), "summary": f"Updated '{task.title}'."}
+        summary = (
+            f"Marked '{task.title}' as {new_status}." if new_status
+            else f"Updated '{task.title}'."
+        )
+        return {"ok": True, "task": task.to_brief(), "summary": summary}
 
 
 async def query_tasks(args: dict, session_context: dict) -> dict:
@@ -167,22 +159,3 @@ async def query_tasks(args: dict, session_context: dict) -> dict:
     else:
         summary = "No matching tasks found."
     return {"ok": True, "tasks": brief, "summary": summary}
-
-
-async def update_task_status(args: dict, session_context: dict) -> dict:
-    user_id = _user(session_context)
-    new_status = args.get("new_status", "")
-    if new_status not in svc.VALID_STATUSES:
-        return {"ok": False, "error": "invalid_status", "summary": f"'{new_status}' is not a valid status."}
-
-    async with async_session() as session:
-        task, unblocked = await svc.update_status(
-            session, user_id, args.get("task", ""), new_status, args.get("note")
-        )
-        if task is None:
-            return {"ok": False, "error": "task_not_found", "summary": "I couldn't find that task."}
-        result = {"id": task.id, "title": task.title, "status": task.status}
-        await session.commit()
-
-    extra = f" Unblocked: {', '.join(unblocked)}." if unblocked else ""
-    return {"ok": True, "task": result, "summary": f"Marked '{result['title']}' as {new_status}.{extra}"}

@@ -1,18 +1,15 @@
 """
-Memory service — free-form durable facts (`remember` / `recall`).
+Memory service — the single long-term store (`remember` / `recall`).
 
-Interface contract (kept deliberately backend-agnostic so a future swap to
-Mem0/pgvector vector search touches only this file):
+`user_memories` is the one durable "what we know about the user" store. The
+former parallel knowledge-graph + reflection layers were removed in the memory
+revamp (see docs/db_revamp.md) — one store, single-pass extraction.
+
+Interface contract (kept backend-agnostic so a future swap to mem0/pgvector
+vector search touches only this file):
 
     recall(session, user_id, limit)  -> list[str]   # fast DB read, hot path
     remember(user_id, user_text, assistant_text)    # fire-and-forget, own session
-
-`remember` runs two extraction passes in parallel:
-  1. The original flat-fact extraction (UserMemory rows — backward compat).
-  2. The new graph extraction (entities + temporal edges + mood signals).
-
-Both are fire-and-forget.  The graph path will eventually replace the flat
-path once trust is established; for now both run side-by-side.
 """
 
 import json
@@ -105,23 +102,10 @@ async def _flat_remember(user_id: str, user_text: str, assistant_text: str) -> N
 async def remember(user_id: str, user_text: str, assistant_text: str) -> None:
     """Extract + store durable facts from one exchange. Fire-and-forget.
 
-    Runs both the legacy flat-fact extraction AND the new graph extraction in
-    parallel.  Each is independently error-safe.
+    Single-pass extraction into `user_memories` — the one long-term store.
     """
-    # Import here to avoid circular imports at module level.
-    from services.memory.graph_service import extract_and_store
-
-    # Flat facts (backward compat — will be retired once graph is trusted).
     try:
         await _flat_remember(user_id, user_text, assistant_text)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("flat remember failed: %s", exc)
-
-    # Graph extraction (new path).
-    try:
-        edges = await extract_and_store(user_id, user_text, assistant_text)
-        if edges:
-            logger.info("graph remember: %d edge(s) for %s", edges, user_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("graph remember failed: %s", exc)
+        logger.warning("remember failed: %s", exc)
 
