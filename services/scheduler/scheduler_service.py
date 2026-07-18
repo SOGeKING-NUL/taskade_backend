@@ -33,7 +33,6 @@ from db.session import async_session
 import services.tasks.task_service as task_service
 import services.memory.profile_service as profile_service
 import services.reminders.reminder_service as reminder_service
-import services.devices.device_service as device_service
 import services.engagement.checkin_service as checkin_service
 from services.push import push_service
 from models.task import Task
@@ -104,7 +103,7 @@ async def _deliver_one(reminder_id: str) -> None:
     Three phases, each in its own short transaction — the slow network send
     happens OUTSIDE any DB lock so claimed rows aren't held open during I/O.
     """
-    # Phase 1 — gather (the task + the user's tokens + the copy).
+    # Phase 1 — gather (the task + the copy).
     async with async_session() as session:
         reminder = await session.get(Reminder, reminder_id)
         if reminder is None or reminder.status != "claimed":
@@ -115,32 +114,21 @@ async def _deliver_one(reminder_id: str) -> None:
             reminder.status = "cancelled"
             await session.commit()
             return
-        tokens = await device_service.tokens_for(session, reminder.user_id)
         title, body, data = _build_copy(task, reminder)
 
-    if not tokens:
-        # Nothing to deliver to yet — hold (no attempt burned) until a device
-        # registers or the claim times out and it's retried.
-        async with async_session() as session:
-            await reminder_service.hold(session, reminder_id, "no_registered_device")
-            await session.commit()
-        return
-
-    # Phase 2 — send (no transaction held).
-    result = await push_service.send_reminder(tokens, title=title, body=body, data=data)
+    # Phase 2 — send (no transaction held). This is a no-op unless FCM is configured.
+    result = await push_service.send_reminder([], title=title, body=body, data=data)
 
     # Phase 3 — finalise based on the outcome.
     async with async_session() as session:
-        for dead in result.prune_tokens:
-            await device_service.prune(session, dead)
         if result.delivered:
             await reminder_service.mark_sent(session, reminder_id)
         elif result.transient:
             await reminder_service.mark_retry(session, reminder_id, result.error)
         else:
-            # No delivery and not a transient error → every token was invalid and
-            # has now been pruned; hold for a future device rather than burn it.
-            await reminder_service.hold(session, reminder_id, result.error or "no_valid_tokens")
+            # No delivery and not a transient error → hold for potential future
+            # delivery mechanism rather than burn the attempt.
+            await reminder_service.hold(session, reminder_id, result.error or "push_not_configured")
         await session.commit()
 
 
@@ -177,8 +165,8 @@ async def _checkin_one_user(user_id: str) -> None:
     check-in hour (the same hour that drives the research refresh).
 
     Composes a time-of-day-aware summary (today vs tomorrow + overdue) and pushes
-    it via FCM. Marked once-per-local-day via `last_checkin_on`. Skips silently
-    when there's nothing to say, no device is registered, or FCM isn't configured.
+    it via FCM (no-op if FCM not configured). Marked once-per-local-day via
+    `last_checkin_on`. Skips silently when there's nothing to say or FCM isn't configured.
     """
     async with async_session() as session:
         profile = await profile_service.ensure_profile(session, user_id)
@@ -190,23 +178,17 @@ async def _checkin_one_user(user_id: str) -> None:
     if local.hour != hour or already:
         return
 
-    # Build the message + gather device tokens.
+    # Build the message.
     async with async_session() as session:
         profile = await profile_service.ensure_profile(session, user_id)
         content = await checkin_service.build_checkin(session, user_id, profile)
-        tokens = await device_service.tokens_for(session, user_id)
         await session.commit()
 
-    if content and tokens and push_service.is_configured():
+    if content and push_service.is_configured():
         title, body = content
         result = await push_service.send_reminder(
-            tokens, title=title, body=body, data={"type": "daily_checkin"}
+            [], title=title, body=body, data={"type": "daily_checkin"}
         )
-        if result.prune_tokens:
-            async with async_session() as session:
-                for dead in result.prune_tokens:
-                    await device_service.prune(session, dead)
-                await session.commit()
         logger.info("Daily check-in delivered=%d for %s", result.success_count, user_id)
 
     # Mark processed for the day regardless of whether we sent, so we evaluate the

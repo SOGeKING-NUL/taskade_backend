@@ -27,7 +27,6 @@ import services.tasks.task_service as task_service
 import services.memory.profile_service as profile_service
 import services.memory.memory_service as memory_service
 import services.engagement.engagement_service as engagement_service
-import services.devices.device_service as device_service
 import services.reminders.reminder_service as reminder_service
 from services.auth.auth_service import (
     authenticate_websocket,
@@ -895,46 +894,8 @@ async def due_reminders(user_id: str = Depends(get_current_user_id)):
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  Push notifications — device-token registration + delivery acknowledgement
+#  Reminder delivery acknowledgement (web client uses polling, not push)
 # ═════════════════════════════════════════════════════════════════════════
-class DeviceTokenIn(BaseModel):
-    token: str
-    platform: str | None = "android"
-
-
-@app.post("/devices/register")
-async def register_device(
-    body: DeviceTokenIn, user_id: str = Depends(get_current_user_id)
-):
-    """Register (or refresh) the caller's FCM device token so the delivery sweep
-    can push reminders to it. Idempotent by token."""
-    token = body.token.strip()
-    if not token:
-        return {"ok": False, "error": "empty_token"}
-    async with async_session() as session:
-        await device_service.register(session, user_id, token, body.platform or "android")
-        await session.commit()
-    return {"ok": True}
-
-
-@app.post("/devices/unregister")
-async def unregister_device(
-    body: DeviceTokenIn, user_id: str = Depends(get_current_user_id)
-):
-    """Drop a device token (e.g. on logout) so it stops receiving pushes.
-
-    Uses POST (not DELETE-with-path) because FCM tokens contain characters that
-    are awkward to carry safely in a URL path segment.
-    """
-    token = body.token.strip()
-    if not token:
-        return {"ok": False, "error": "empty_token"}
-    async with async_session() as session:
-        removed = await device_service.unregister(session, token)
-        await session.commit()
-    return {"ok": True, "removed": removed}
-
-
 @app.post("/reminders/{reminder_id}/delivered")
 async def reminder_delivered(
     reminder_id: str, user_id: str = Depends(get_current_user_id)
