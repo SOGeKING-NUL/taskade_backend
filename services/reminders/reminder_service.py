@@ -33,17 +33,20 @@ logger = logging.getLogger(__name__)
 # Non-terminal statuses — rows that a re-sync may re-arm or stand down.
 _LIVE = (PENDING, CLAIMED)
 
+# Default reminder offsets (minutes before due) when nothing more specific is
+# given: one at the event time, one 10 minutes before. Never overridden per
+# deployment in practice, so it's a plain constant rather than an env setting.
+_DEFAULT_OFFSETS = [0, 10]
+
 
 def default_offsets() -> list[int]:
-    """Configured default offsets (minutes before due) — e.g. [0, 10]."""
-    return _normalize_offsets(
-        [p.strip() for p in settings.REMINDER_DEFAULT_OFFSETS.split(",")]
-    )
+    """Default offsets (minutes before due) — [0, 10]."""
+    return list(_DEFAULT_OFFSETS)
 
 
 def _normalize_offsets(raw) -> list[int]:
     """Sanitize an offsets list: non-negative ints, de-duplicated, sorted.
-    Falls back to the configured default when nothing usable is supplied."""
+    Falls back to the default when nothing usable is supplied."""
     out: set[int] = set()
     for v in raw or []:
         try:
@@ -53,14 +56,7 @@ def _normalize_offsets(raw) -> list[int]:
         if n >= 0:
             out.add(n)
     if not out:
-        # Avoid recursion: read the raw default directly here.
-        for p in settings.REMINDER_DEFAULT_OFFSETS.split(","):
-            try:
-                n = int(p.strip())
-            except ValueError:
-                continue
-            if n >= 0:
-                out.add(n)
+        return list(_DEFAULT_OFFSETS)
     return sorted(out)
 
 

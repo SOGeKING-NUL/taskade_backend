@@ -4,9 +4,12 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# core/config.py → core/ → project root
+# core/config.py → core/ → project root.
+# override=True: the project .env is authoritative — without it, a stale
+# machine-level env var (e.g. an old AUTH0_CLIENT_ID) silently wins and
+# auth fails with "Audience doesn't match".
 _project_root = Path(__file__).resolve().parent.parent
-load_dotenv(_project_root / ".env")
+load_dotenv(_project_root / ".env", override=True)
 
  
 class Settings:
@@ -110,9 +113,6 @@ class Settings:
     REMINDER_CLAIM_TIMEOUT_SECONDS: int = int(os.getenv("REMINDER_CLAIM_TIMEOUT_SECONDS", "120"))
     # How many reminders one sweep tick claims at most.
     REMINDER_BATCH_LIMIT: int = int(os.getenv("REMINDER_BATCH_LIMIT", "100"))
-    # Default reminder offsets (minutes before due) when the user doesn't specify:
-    # one 10 minutes before and one at the event time.
-    REMINDER_DEFAULT_OFFSETS: str = os.getenv("REMINDER_DEFAULT_OFFSETS", "0,10")
     # Cap on the number of reminders generated for a "remind me until it starts"
     # (ramp-up) request — keeps an escalating schedule useful, never spammy.
     REMINDER_MAX_RAMP: int = int(os.getenv("REMINDER_MAX_RAMP", "8"))
