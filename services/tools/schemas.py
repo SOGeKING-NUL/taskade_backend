@@ -1,47 +1,24 @@
 """
-Tool/function-call declarations in OpenAI `tools=[...]` format.
-
-Two distinct tool sets:
-  • ESCALATE_TOOL        — the single tool the fast SLM (Groq) may call to hand
-                           a turn off to the tool-calling LLM.
-  • TASK_TOOL_DECLARATIONS — the real action tools the LLM (OpenRouter) can call.
-                           (`research` is added in Milestone 3.)
+Tool/function-call declarations in OpenAI `tools=[...]` format — the action
+tools the brain can call: create_task, query_tasks, update_task, research,
+update_profile. `research` is backed by a separate web-search service.
 """
 
-# ── SLM routing tool ─────────────────────────────────────────────────────
-ESCALATE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "escalate_to_assistant",
-        "description": (
-            "Hand off to the advanced assistant ONLY when the user wants to "
-            "create, update, complete, or list/look up a task or reminder. "
-            "Do NOT call this for greetings, casual chat, or general/factual "
-            "questions — answer those yourself directly."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "intent_summary": {
-                    "type": "string",
-                    "description": "One sentence describing exactly what the user wants done.",
-                },
-            },
-            "required": ["intent_summary"],
-        },
-    },
-}
-
-# ── LLM action tools ─────────────────────────────────────────────────────
+# ── Action tools ─────────────────────────────────────────────────────────
 TASK_TOOL_DECLARATIONS = [
     {
         "type": "function",
         "function": {
             "name": "create_task",
             "description": (
-                "Create a task or reminder for the user. Use for single-step "
-                "reminders ('recharge my phone Friday') and for multi-step goals "
-                "(pass a parent_task to nest a sub-step under an existing task)."
+                "Create a task OR set a reminder — these are the EXACT SAME thing in "
+                "this system; there is no separate reminder feature. Call this for "
+                "'remind me to...', 'set a reminder for...', 'set up a reminder...', "
+                "'add a task...', 'create a task...', 'track this...', or any "
+                "equivalent phrasing — all of them mean the same request. Use for "
+                "single-step reminders ('recharge my phone Friday') and for "
+                "multi-step goals (pass a parent_task to nest a sub-step under an "
+                "existing task)."
             ),
             "parameters": {
                 "type": "object",
@@ -104,37 +81,6 @@ TASK_TOOL_DECLARATIONS = [
                     "parent_task": {
                         "type": "string",
                         "description": "Optional title or id of an existing task to nest this under.",
-                    },
-                    "depends_on_task": {
-                        "type": "string",
-                        "description": "Optional title or id of a task that must be done first.",
-                    },
-                    "needs_research": {
-                        "type": "boolean",
-                        "description": "True if external/current info is needed to fill in dates/details.",
-                    },
-                    "research_query": {
-                        "type": "string",
-                        "description": (
-                            "When needs_research is true, the EXACT search query to use when "
-                            "the scheduler polls for this task in the background. Be specific "
-                            "(e.g. 'JLPT N5 registration link India December 2026 session')."
-                        ),
-                    },
-                    "success_condition": {
-                        "type": "string",
-                        "description": (
-                            "When needs_research is true, what constitutes a successful search "
-                            "result (e.g. 'Find a valid registration URL', 'Confirm the exam date'). "
-                            "The scheduler uses this to decide whether to keep retrying."
-                        ),
-                    },
-                    "retry_interval_days": {
-                        "type": "integer",
-                        "description": (
-                            "When needs_research is true and the search fails, how many days to "
-                            "wait before retrying. Default: 7."
-                        ),
                     },
                     "user_confirmed": {
                         "type": "boolean",
@@ -210,11 +156,13 @@ TASK_TOOL_DECLARATIONS = [
         "function": {
             "name": "update_task",
             "description": (
-                "Amend an EXISTING task's details — add or correct its link, fee, "
-                "due date, description, or link it to a parent/prerequisite task. "
-                "Use this (NOT create_task) whenever the user asks to add "
-                "information to, correct, or extend something already tracked — "
-                "calling create_task again would duplicate it instead of updating it."
+                "Amend an EXISTING task or reminder's details ('task' and 'reminder' "
+                "are the same thing here) — add or correct its link, fee, due date, "
+                "description, status, or link it to a parent/prerequisite task. Use "
+                "this (NOT create_task) whenever the user asks to add information to, "
+                "correct, extend, reschedule, or complete/cancel something already "
+                "tracked — calling create_task again would duplicate it instead of "
+                "updating it."
             ),
             "parameters": {
                 "type": "object",
@@ -257,13 +205,17 @@ TASK_TOOL_DECLARATIONS = [
                         "type": "string",
                         "description": "Optional title/id of an existing task to nest this under.",
                     },
-                    "depends_on_task": {
+                    "new_status": {
                         "type": "string",
+                        "enum": ["pending", "active", "done", "cancelled"],
                         "description": (
-                            "Optional title/id of a prerequisite task — set this when the user "
-                            "links this task to something already tracked, even from an earlier "
-                            "turn (e.g. 'participate in the race' depends on 'register for it')."
+                            "Set when the user completes or cancels this task — 'I finished "
+                            "it' → done, 'never mind, drop it' → cancelled."
                         ),
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Optional note about why the task changed.",
                     },
                     "research_summary": {
                         "type": "string",
@@ -276,28 +228,6 @@ TASK_TOOL_DECLARATIONS = [
                     },
                 },
                 "required": ["task"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_task_status",
-            "description": "Update the status of an existing task, e.g. when the user says they've completed or cancelled it.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "Title or id of the task to update (fuzzy-matched against active tasks).",
-                    },
-                    "new_status": {
-                        "type": "string",
-                        "enum": ["pending", "blocked", "active", "done", "cancelled"],
-                    },
-                    "note": {"type": "string", "description": "Optional note about why it changed."},
-                },
-                "required": ["task", "new_status"],
             },
         },
     },
