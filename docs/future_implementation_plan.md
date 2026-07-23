@@ -1,3 +1,11 @@
+> **Completed.** Every change proposed below has shipped: the two-layer leak
+> detector lives in `services/ai/slm.py`, time-bound tasks work via `due_at`/
+> `window_start`/`window_end`, `GET /debug/scheduler` exists, and the `metadata` WS
+> message + `MetadataCard.jsx` are live. Kept as a record of the reasoning; see
+> `system_explanation.md` §14 and `architecture_overview.md` for how these work
+> today (some details below, like the specific tool list and `escalate_to_assistant`,
+> predate the later tool-surface simplification in `db_revamp.md`).
+
 # Future Implementation Plan — Tool Reliability, Time-Bound Tasks & Richer Metadata
 
 ## Context

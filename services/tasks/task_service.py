@@ -66,6 +66,11 @@ def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", text.lower())}
 
 
+def _norm_title(text: str) -> str:
+    """Case-folded, whitespace-collapsed title for exact-duplicate detection."""
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
 def _aware(dt: datetime | None) -> datetime | None:
     """Coerce a datetime to timezone-aware UTC so comparisons never crash on a
     naive value (Postgres returns tz-aware, but a tool-supplied ISO date may be
@@ -113,6 +118,29 @@ async def find_task(session: AsyncSession, user_id: str, needle: str | None) -> 
         return None
     matches.sort(key=lambda t: t.status in _CLOSED)  # open tasks first
     return matches[0]
+
+
+async def _find_open_duplicate(
+    session: AsyncSession, user_id: str, title: str, parent_id: str | None
+) -> Task | None:
+    """An OPEN task with the same (normalized) title under the same parent.
+
+    The dedup match is intentionally EXACT-on-normalized-title (not the fuzzy
+    word-overlap `find_task` uses) so it can't merge two genuinely different tasks —
+    only a true re-creation of one already tracked. Scoped to the same parent so an
+    identically-named step under a different goal stays distinct, and to OPEN tasks so
+    re-doing a finished/recurring task still creates a fresh one.
+    """
+    norm = _norm_title(title)
+    rows = (
+        await session.execute(select(Task).where(Task.user_id == user_id))
+    ).scalars().all()
+    for t in rows:
+        if t.status in _CLOSED:
+            continue
+        if t.parent_id == parent_id and _norm_title(t.title) == norm:
+            return t
+    return None
 
 
 async def find_relevant_tasks(
@@ -167,12 +195,34 @@ async def create_task(
     await ensure_user(session, user_id)
 
     parent_task = await find_task(session, user_id, parent) if parent else None
+    parent_id = parent_task.id if parent_task else None
+
+    # Idempotency guard: if an OPEN task with this exact title already exists under the
+    # same parent, DON'T create a duplicate — merge any fresh research into it and
+    # return it. Fixes "asked to research X → got two identical subtasks", and also
+    # absorbs an accidental double create_task within one turn (each tool call commits,
+    # so the second sees the first).
+    dup = await _find_open_duplicate(session, user_id, title, parent_id)
+    if dup is not None:
+        if context:
+            merged = dict(dup.context or {})
+            merged.update(context)  # fresh research wins over anything stale
+            dup.context = merged
+        if due_at is not None:
+            dup.due_at = due_at
+            offsets = reminder_offsets
+            if ramp_up:
+                offsets = reminder_service.ramp_up_offsets(dup.due_at)
+            await reminder_service.sync_for_task(session, dup, offsets)
+        await session.flush()
+        logger.info("create_task deduped → existing %s (%s)", dup.title, dup.id)
+        return dup, parent_task
 
     task = Task(
         user_id=user_id,
         title=title,
         description=description,
-        parent_id=parent_task.id if parent_task else None,
+        parent_id=parent_id,
         status="pending",
         due_at=due_at,
         window_start=window_start,

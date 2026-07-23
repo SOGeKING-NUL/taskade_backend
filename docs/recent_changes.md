@@ -325,3 +325,90 @@ parameterized by client/model. Both `GroqSLM` and `OpenRouterLLM` now delegate t
 `llm.py` no longer carries its own copy of anything. There is now structurally only one
 place this logic can exist, so the primary and fallback paths can't drift apart again.
 Verified: `GroqSLM().system_prompt == OpenRouterLLM().system_prompt` is `True`.
+
+---
+
+## 15. Frontend: metadata card formatting, single-turn caption, full transcript
+
+**Problem (user-reported):** three UI issues at once. The research metadata card was
+showing literal markdown syntax (`**bold**`, `[text](url)`) instead of readable prose,
+and its line breaks were collapsing into one run-on paragraph. The live caption area
+was rendering the *entire* conversation history persistently instead of just the
+current turn, making it hard to follow what was just said. And there was no way to
+see the full conversation transcript at all once it stopped being shown inline.
+
+**Root causes:** the research model's prompt didn't forbid markdown output strongly
+enough, so it sometimes emitted it even though the findings are shown in a UI card,
+not spoken; the CSS for the caption area had no `white-space: pre-line`; and the old
+`ChatTranscript` component rendered the full `messages` array on every render with no
+"just this turn" mode.
+
+**Fixes:**
+- Tightened `research_service.py`'s system prompt to explicitly forbid markdown
+  syntax in findings text.
+- Added `client/src/utils/markdown.js`'s `stripMarkdown()` as a defensive
+  client-side cleanup applied in `MetadataCard.jsx`, and `white-space: pre-line` on
+  `.meta-row` to preserve line breaks.
+- Split the old always-visible transcript into two components: `LiveCaption.jsx`
+  (ambient, exactly one line — either the user's interim speech or the AI's answer,
+  never both, never history) and `TranscriptPage.jsx` (the full `messages` array as
+  a translucent overlay, opened via a new button in `VoiceChat`'s top row, matching
+  the existing `TasksPage` overlay pattern).
+
+---
+
+## 16. Reminder default offsets: hardcoded constant instead of env var
+
+**Problem:** `REMINDER_DEFAULT_OFFSETS` lived in `core/config.py` as an env var
+(`os.getenv("REMINDER_DEFAULT_OFFSETS", "0,10")`), but it had never actually been
+customized across any deployment — it was pure config-surface noise for a value that
+never changes in practice.
+
+**Fix:** moved it into `services/reminders/reminder_service.py` as a plain module
+constant, `_DEFAULT_OFFSETS = [0, 10]`, and removed the env-var plumbing (and the
+comma-split parsing it required) from `config.py` entirely. `default_offsets()` and
+`_normalize_offsets()`'s fallback both just return `list(_DEFAULT_OFFSETS)` now.
+
+---
+
+## 17. "Set a reminder" wasn't reliably recognized as "create a task"
+
+**Problem (user-reported):** asking the assistant to "set a reminder" for something
+didn't create anything, while phrasing the identical request as "create a task"
+worked. The system prompt only mentioned the reminder/task equivalence once, in a
+single paragraph roughly two-thirds of the way through a long prompt — easy for the
+model to under-weight relative to whichever exact phrasing it saw.
+
+**Fix:** made the equivalence explicit and redundant in four separate places instead
+of one: (1) a new standalone paragraph at the very top of the system prompt, stated
+before any other rule; (2) the `create_task` tool's own description, which now leads
+with "these are the EXACT SAME thing" and lists trigger phrases explicitly
+(`"remind me to..."`, `"set a reminder for..."`, `"add a task..."`); (3) the
+`update_task` tool's description, extended to cover "that reminder" the same way as
+"that task"; (4) the existing `CREATING TASKS` and `REMINDERS` prompt sections,
+both re-worded to explicitly restate the equivalence rather than assume it carries
+over from elsewhere. Tool descriptions matter as much as the system prompt here —
+the model reads tool schemas as its structured menu of available actions, so
+reinforcing it there is not redundant with the prompt, it's a second, independent
+surface the model consults.
+
+---
+
+## 18. Removed `device_tokens` and the push-notification registry entirely
+
+**Problem:** the `device_tokens` table existed in the schema, empty, since the web
+client has never used push (it polls `GET /reminders/due` instead) and no mobile
+client exists yet to register a token. An empty table with live registration
+endpoints pointing at it was dead weight, not a bug — but dead weight worth removing
+once confirmed unused rather than leaving as a permanent maybe.
+
+**Fix:** deleted `models/device_token.py`, `services/devices/` (the registration
+service), the `POST /devices/register` / `POST /devices/unregister` REST endpoints,
+and all token-gathering/pruning calls from the scheduler's push-delivery sweep
+(`services/scheduler/scheduler_service.py`). The push-delivery functions
+(`_deliver_one`, `_checkin_one_user`) now pass an empty token list to
+`push_service.send_reminder()`, which is already a graceful no-op without FCM
+credentials configured — so removing the registry didn't change any user-visible
+behavior, since the push path was never actually delivering anything in this
+deployment. The `Reminder` ledger itself (`reminder_service.py`) is untouched — it's
+independent of *how* tokens would be gathered, only of whether they exist.

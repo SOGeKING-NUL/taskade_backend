@@ -1,3 +1,11 @@
+> **Historical / superseded.** This plan was implemented (the knowledge graph,
+> reflection sweeps, and consent/fallback fixes described below all shipped) and
+> then the graph + reflection layers were **deliberately removed** in the later
+> memory/task revamp — see `db_revamp.md` for why, and `system_explanation.md` for
+> what's actually running today. The consent-gate and SLM/LLM-fallback fixes
+> described in §4/§6 below are still in effect; only the graph/reflection parts
+> were reverted.
+
 # Architecture Upgrade: Continuity-Aware Temporal Knowledge Graph
 
 This document details the architectural pivot from a "flat fact" memory system to a **Temporal Knowledge Graph**, alongside necessary safeguards for the autonomous task and research engines.

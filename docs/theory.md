@@ -1,3 +1,9 @@
+> **Historical / superseded.** This document describes the theory behind a temporal
+> knowledge-graph + reflection memory system that was subsequently **built and then
+> deliberately removed** (see `db_revamp.md`) in favor of a simpler flat-fact store.
+> Kept as background reading on the concepts, not as a description of what's running
+> today — see `system_explanation.md` §11 for the current memory design.
+
 # Agentic Memory Systems: Theory and Architecture
 
 This is a fantastic question. The AI memory space has evolved incredibly fast over the last two years, borrowing heavily from cognitive psychology and graph mathematics. Let's break down all the jargon, theory, and the exact approach we discussed so you have a rock-solid understanding of what we're building and why.

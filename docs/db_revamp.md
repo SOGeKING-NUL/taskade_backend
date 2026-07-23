@@ -28,7 +28,7 @@ read and every tool parameter is a cost.
 | `user_memories` | ✓ | ✓ | **now the single long-term store** |
 | `tasks` | ✓ | ✓ | dropped `depends_on_id`, `requires_research` |
 | `reminders` | ✓ | ✓ | unchanged (clean delivery ledger) |
-| `device_tokens` | ✓ | ✓ | unchanged |
+| `device_tokens` | ✓ | ✓ at the time | **later dropped entirely** (2026-07-19) — the web client polls instead of using push, and no mobile client existed to register a token; see `recent_changes.md` §18 |
 | `entities` | ✓ | ✗ | dropped — knowledge graph |
 | `entity_edges` | ✓ | ✗ | dropped — knowledge graph |
 | `reflections` | ✓ | ✗ | dropped — reflection layer |

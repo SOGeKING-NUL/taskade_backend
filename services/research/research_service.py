@@ -16,7 +16,9 @@ Returns a normalized, domain-agnostic contract:
 """
 
 import logging
+import re
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
@@ -27,14 +29,44 @@ logger = logging.getLogger(__name__)
 _RESEARCH_SYSTEM_PROMPT_BASE = (
     "You are a research assistant with live web access. Answer the query factually "
     "and concisely using current information. Focus on concrete, actionable facts: "
-    "key dates and deadlines, required steps, costs, and official links. Reply in "
-    "3-6 sentences of PLAIN PROSE — no markdown (no **bold**, no numbered/bulleted "
-    "lists, no inline [text](url) links). This text is shown directly in a UI card; "
-    "source links are extracted and shown separately, so don't repeat them inline. "
-    "When a concrete date is known, state it explicitly (e.g. 'registration closes "
-    "on 15 July 2026'). Do not speculate — if something is uncertain or you "
-    "couldn't verify it, say so plainly."
+    "key dates and deadlines, required steps, costs, and where to go. Reply in "
+    "3-6 sentences of PLAIN, FLOWING PROSE — full sentences a person would say out "
+    "loud, NOT 'Label: value' pairs (write 'it's on 26 November at JLN Stadium', "
+    "never 'Date: 26 November, Venue: JLN Stadium'). No markdown (no **bold**, no "
+    "numbered/bulleted lists, no inline [text](url) links) and NEVER write out a "
+    "raw URL like https://... in the text. This text is shown directly in a UI card "
+    "AND read aloud by a voice assistant; the source links are extracted and shown "
+    "separately as clickable chips, so name WHERE to go (e.g. 'register on "
+    "BookMyShow') but never the address itself. When a concrete date is known, "
+    "state it explicitly (e.g. 'registration closes on 15 July 2026'). Do not "
+    "speculate — if something is uncertain or you couldn't verify it, say so plainly."
 )
+
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _strip_urls(text: str) -> str:
+    """Remove any bare URLs the model wrote into the prose anyway.
+
+    The prompt already forbids them, but a model doesn't reliably comply — and this
+    text is both shown in the card and read aloud by TTS, where a spoken URL is the
+    worst possible outcome. The links live in the structured `links` list regardless,
+    so nothing is lost by stripping them from the prose.
+    ponytail: prompt is the primary fix; this is the deterministic safety net.
+    """
+    cleaned = _URL_RE.sub("", text or "")
+    cleaned = re.sub(r"\s+([.,;:])", r"\1", cleaned)  # drop space left before punctuation
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def _hostname_label(url: str) -> str:
+    """A clean, human-readable chip label from the URL's host (e.g. 'bookmyshow.com'),
+    instead of the provider's scraped page <title>, which is often garbled/duplicated."""
+    try:
+        host = urlparse(url).netloc or url
+    except ValueError:
+        return url
+    return host[4:] if host.startswith("www.") else host
 
 
 def _system_prompt() -> str:
@@ -57,20 +89,22 @@ def _extract_links(resp, msg) -> list[dict]:
     links: list[dict] = []
     seen: set[str] = set()
 
-    def _add(url: str | None, label: str | None) -> None:
+    def _add(url: str | None) -> None:
+        # Label is always derived from the host — scraped page titles are unreliable
+        # (duplicated/garbled), and the host is all a citation chip needs to show.
         if url and url not in seen:
             seen.add(url)
-            links.append({"label": label or url, "url": url})
+            links.append({"label": _hostname_label(url), "url": url})
 
     # OpenRouter standardizes citations as message.annotations[].url_citation
     for a in (getattr(msg, "annotations", None) or []):
         if isinstance(a, dict):
             uc = a.get("url_citation") or {}
-            _add(uc.get("url"), uc.get("title"))
+            _add(uc.get("url"))
         else:
             uc = getattr(a, "url_citation", None)
             if uc is not None:
-                _add(getattr(uc, "url", None), getattr(uc, "title", None))
+                _add(getattr(uc, "url", None))
 
     # Fallback: some providers return a top-level `citations` list.
     if not links:
@@ -80,9 +114,9 @@ def _extract_links(resp, msg) -> list[dict]:
             dump = {}
         for c in (dump.get("citations") or []):
             if isinstance(c, str):
-                _add(c, None)
+                _add(c)
             elif isinstance(c, dict):
-                _add(c.get("url"), c.get("title"))
+                _add(c.get("url"))
 
     return links
 
@@ -108,7 +142,7 @@ class ResearchService:
             temperature=0.2,
         )
         msg = resp.choices[0].message
-        summary = (msg.content or "").strip()
+        summary = _strip_urls((msg.content or "").strip())
         links = _extract_links(resp, msg)
         logger.info("research '%.60s' → %d sources", query, len(links))
         return {"summary": summary, "links": links, "source_count": len(links)}
