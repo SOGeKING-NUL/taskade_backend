@@ -2,6 +2,11 @@
 
 Taskade is a personal assistant you talk to instead of type into. You speak naturally, it figures out what you actually want, and depending on the request it either answers you directly or goes and does something — creates a task, looks something up on the web, checks what's on your plate today. It remembers things about you across conversations, so you don't have to repeat yourself, and it can remind you when something's due. It's built to be usable by anyone for everyday life, not just a developer demo — the same way you'd ask a person to remind you to call someone or look something up for you.
 
+## Demo [CLICK TO WATCH]
+
+[![Taskade Demo Video](https://img.youtube.com/vi/NuSliZCNxWU/maxresdefault.jpg)](https://www.youtube.com/watch?v=NuSliZCNxWU)
+
+
 - **Live backend:** https://soge2020-taskade-backend.hf.space
 - **Voice pipeline:** Deepgram Nova-3 (STT) + Sarvam Bulbul (TTS), streaming both ways
 - **Brain:** Groq, running Llama 3.3 70B via an OpenAI-compatible endpoint — the single model that reasons, decides, and calls tools directly. OpenRouter (GPT-4o-mini) is a structural fallback for when Groq's tool-calling glitches, plus the separate model call behind web research and background memory extraction
@@ -9,9 +14,7 @@ Taskade is a personal assistant you talk to instead of type into. You speak natu
 - **Auth / DB / Backend / Frontend:** Auth0 (Google sign-in) · Postgres (Supabase) · FastAPI · React
 - **Deployment:** a GitHub Actions workflow pushes straight to the Hugging Face Space on every push to `main` using a publihs.yml file, no manual deploy step
 
-## Demo
 
-[![Taskade Demo Video](https://img.youtube.com/vi/NuSliZCNxWU/maxresdefault.jpg)](https://www.youtube.com/watch?v=NuSliZCNxWU)
 
 ## System design
 
